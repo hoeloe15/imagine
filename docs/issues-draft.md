@@ -9,7 +9,7 @@ Suggested milestones:
 - **Phase 1 — local MVP** (issues 1–14)
 - **Phase 2 — local portal** (issues 15–19)
 - **Phase 3 — Azure deployment** (issues 20–24)
-- **Ongoing** (issues 25–27)
+- **Ongoing** (issues 25–28)
 
 Phase 1 is deliberately fine-grained — those issues are meant to be picked up and
 finished. Phase 2 and 3 are epics; they get broken down when their phase starts.
