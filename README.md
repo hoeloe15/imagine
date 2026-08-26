@@ -482,6 +482,12 @@ against its own working directory, which your MCP client chooses. Use
 relaunched. A config file that is malformed or names an unknown key fails
 loudly at startup with the file path and the offending field.
 
+**`npx -y imagine-mcp` says `'imagine' is not recognized`** — you are running it
+from inside a clone of this repo. npm resolves the package name to the local
+project instead of the registry, and a package's own bin is never shimmed into
+its own `node_modules/.bin`. Run it from any other directory, or use
+`node <repo>/dist/index.js` when working inside the clone.
+
 **Images end up somewhere unexpected** — relative paths in `output.dir` resolve
 against the server's working directory, not your project. Use an absolute path,
 or pass `output_dir` on the call. The exact path is always in the tool result.
