@@ -13,3 +13,6 @@ imagine-output/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# blog
+/docs/blog/
