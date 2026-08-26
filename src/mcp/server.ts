@@ -9,8 +9,18 @@ import {
   registerGenerateImage,
   type GenerateImageDependencies,
 } from "./tools/generate-image.js";
+import {
+  registerListCapabilities,
+  type ListCapabilitiesDependencies,
+} from "./tools/list-capabilities.js";
+import {
+  registerRecommendModel,
+  type RecommendModelDependencies,
+} from "./tools/recommend-model.js";
 
-export type ServerDependencies = GenerateImageDependencies;
+export type ServerDependencies = GenerateImageDependencies &
+  ListCapabilitiesDependencies &
+  RecommendModelDependencies;
 
 export function createServer(deps: ServerDependencies): McpServer {
   const server = new McpServer(
@@ -19,6 +29,8 @@ export function createServer(deps: ServerDependencies): McpServer {
   );
 
   registerGenerateImage(server, deps);
+  registerListCapabilities(server, deps);
+  registerRecommendModel(server, deps);
 
   return server;
 }
