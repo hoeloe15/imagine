@@ -1,0 +1,6 @@
+dist/
+node_modules/
+package-lock.json
+
+# Prose is hand-wrapped in this repo; Prettier reflows it destructively.
+*.md

@@ -11,8 +11,64 @@ tool result.
 
 ## Status
 
-**Early design.** Nothing is implemented yet. See [PLAN.md](PLAN.md) for the
-architecture, tool API, data model and phasing.
+**Early development.** The package is scaffolded and the MCP server starts and
+speaks the protocol, but it exposes no tools yet — `tools/list` returns an empty
+list. See [PLAN.md](PLAN.md) for the architecture, tool API, data model and
+phasing.
+
+## Install and run
+
+Requires Node 20 or newer.
+
+```sh
+npx imagine-mcp
+```
+
+The server speaks MCP over stdio, so it is meant to be launched by an MCP client
+rather than run by hand. In a client's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "imagine": {
+      "command": "npx",
+      "args": ["-y", "imagine-mcp"]
+    }
+  }
+}
+```
+
+The package is not published to npm yet, so for now run it from a clone (see
+below).
+
+## Development
+
+```sh
+npm install     # install dependencies
+npm run build   # bundle src/index.ts to dist/ with tsup
+npm test        # build, then run the vitest suite
+npm run lint    # eslint
+npm run format  # prettier --write
+```
+
+`npm run typecheck` runs `tsc --noEmit` over `src` and `test`. CI runs lint,
+format check, typecheck and tests on every push to `main` and every pull
+request.
+
+To run the local build as a server, point your MCP client at
+`node <repo>/dist/index.js`, or `npm link` the package and use `imagine`.
+
+### Layout
+
+| Path             | What lives there                                |
+| ---------------- | ----------------------------------------------- |
+| `src/index.ts`   | binary entry point: starts the stdio server     |
+| `src/mcp/`       | MCP protocol wiring and tool definitions        |
+| `src/core/`      | router, config, knowledge, budget, output       |
+| `src/providers/` | one adapter per image provider                  |
+| `data/`          | curated model knowledge (`models.json`)         |
+| `schema/`        | JSON Schema for the user config file            |
+| `test/`          | `unit/`, `contract/`, `live/` and `e2e/` suites |
 
 ## Planned features
 
