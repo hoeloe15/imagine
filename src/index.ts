@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createServer } from "./mcp/server.js";
+import { createImagineServer } from "./composition.js";
 
-const server = createServer();
+const server = await createImagineServer();
 await server.connect(new StdioServerTransport());

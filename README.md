@@ -11,10 +11,12 @@ tool result.
 
 ## Status
 
-**Early development.** The package is scaffolded and the MCP server starts and
-speaks the protocol, but it exposes no tools yet — `tools/list` returns an empty
-list. See [PLAN.md](PLAN.md) for the architecture, tool API, data model and
-phasing.
+**Early development.** The MCP server starts, speaks the protocol and exposes
+the first of its three planned tools: `generate_image` routes a prompt to a
+configured provider, writes the image to disk and returns its path, what it
+cost and why that model was chosen. `list_capabilities` and `recommend_model`
+do not exist yet, and the configuration story is not documented yet. See
+[PLAN.md](PLAN.md) for the architecture, tool API, data model and phasing.
 
 ## Install and run
 

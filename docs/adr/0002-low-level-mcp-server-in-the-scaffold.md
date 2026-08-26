@@ -1,6 +1,6 @@
 # 2. Low-level MCP `Server` in the scaffold
 
-**Status:** accepted
+**Status:** superseded by [ADR 0010](0010-mcp-server-and-the-generate-image-tool.md)
 **Date:** 2026-08-26
 
 ## Context
@@ -25,3 +25,7 @@ When the first real tool lands (issue #10), revisit this: either keep the
 low-level `Server` and register tool handlers explicitly, or switch to
 `McpServer` — at which point the manual handler must be removed, not kept
 alongside.
+
+That revisit happened in ADR 0010: `generate_image` made the empty list moot,
+`src/mcp/server.ts` moved to `McpServer`, and the manual `tools/list` handler
+was removed.
