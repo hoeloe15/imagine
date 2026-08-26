@@ -25,7 +25,9 @@ describe("createServer", () => {
     ]);
 
     const { tools } = await client.listTools();
-    expect(tools.map((tool) => tool.name)).toEqual(["generate_image"]);
+    const names = tools.map((tool) => tool.name);
+    expect(names).toContain("generate_image");
+    expect(names).toContain("list_capabilities");
 
     await client.close();
   });

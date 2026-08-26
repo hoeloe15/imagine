@@ -34,6 +34,7 @@ export async function buildDependencies(
 
   return {
     config,
+    env: loaded.env,
     knowledge: loadBundledModelKnowledge(),
     ledger:
       ledger ??
