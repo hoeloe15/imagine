@@ -93,4 +93,4 @@ To run the local build as a server, point your MCP client at
 
 ## License
 
-To be decided before first release.
+[MIT](LICENSE)

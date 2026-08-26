@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "description": "A capability router for image generation, exposed as an MCP server.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "bin": {
     "imagine": "dist/index.js"
   },
