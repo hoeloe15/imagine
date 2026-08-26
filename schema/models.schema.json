@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/models.schema.json",
+  "title": "imagine curated model knowledge",
+  "description": "The hand-maintained editorial knowledge in data/models.json: what each image model is good at, what it costs, and which providers can reach it.",
+  "type": "object",
+  "required": ["schema_version", "updated", "disclaimer", "models"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "updated": {
+      "$ref": "#/$defs/isoDate",
+      "description": "When this file was last revised. Surfaced to clients as knowledge_updated so staleness is visible."
+    },
+    "disclaimer": { "type": "string", "minLength": 1 },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/model" }
+    }
+  },
+  "$defs": {
+    "isoDate": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "score": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "Editorial 1-5 judgement, not a measurement."
+    },
+    "strengths": {
+      "type": "object",
+      "description": "One score per use-case tag in src/core/types.ts USE_CASES. Every tag must be present.",
+      "required": [
+        "text_in_image",
+        "photoreal",
+        "illustration",
+        "diagram",
+        "fast_bulk"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "text_in_image": { "$ref": "#/$defs/score" },
+        "photoreal": { "$ref": "#/$defs/score" },
+        "illustration": { "$ref": "#/$defs/score" },
+        "diagram": { "$ref": "#/$defs/score" },
+        "fast_bulk": { "$ref": "#/$defs/score" }
+      }
+    },
+    "leaderboard": {
+      "type": ["object", "null"],
+      "required": ["source", "rank_band", "checked"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "rank_band": { "enum": ["top-3", "top-10", "mid", "unranked"] },
+        "checked": { "$ref": "#/$defs/isoDate" }
+      }
+    },
+    "price": {
+      "type": "object",
+      "required": ["per_image_usd", "confidence", "checked"],
+      "additionalProperties": false,
+      "properties": {
+        "per_image_usd": { "type": "number", "minimum": 0 },
+        "per_image_usd_4k": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "null when the model does not offer a 4K tier."
+        },
+        "confidence": { "enum": ["indicative", "confirmed"] },
+        "checked": { "$ref": "#/$defs/isoDate" }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "required": ["provider", "model_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Adapter id, e.g. openrouter, azure, google, xai."
+        },
+        "model_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "How this provider names the model in its own API."
+        },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "id",
+        "display_name",
+        "family",
+        "leaderboard",
+        "strengths",
+        "typical_latency_s",
+        "price",
+        "availability",
+        "max_size",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical id used in config and tool results. Unique within the file."
+        },
+        "display_name": { "type": "string", "minLength": 1 },
+        "family": { "type": "string", "minLength": 1 },
+        "leaderboard": { "$ref": "#/$defs/leaderboard" },
+        "strengths": { "$ref": "#/$defs/strengths" },
+        "typical_latency_s": { "type": "number", "exclusiveMinimum": 0 },
+        "price": { "$ref": "#/$defs/price" },
+        "availability": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/availability" }
+        },
+        "max_size": { "type": "string", "minLength": 1 },
+        "notes": {
+          "type": "string",
+          "minLength": 1,
+          "description": "When to pick this model and when not to."
+        }
+      }
+    }
+  }
+}

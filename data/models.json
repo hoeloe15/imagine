@@ -1,0 +1,151 @@
+{
+  "$schema": "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/models.schema.json",
+  "schema_version": 1,
+  "updated": "2026-08-26",
+  "disclaimer": "Scores are editorial judgements informed by public leaderboards and hands-on testing, not measurements. Prices are indicative list prices per image at ~1K resolution and change frequently — always confirm with the provider before relying on a number here. Where a provider reports the actual cost of a call, that reported cost wins over this file.",
+  "models": [
+    {
+      "id": "gpt-image-2",
+      "display_name": "GPT Image 2",
+      "family": "openai",
+      "leaderboard": {
+        "source": "public image arena",
+        "rank_band": "top-3",
+        "checked": "2026-08-22"
+      },
+      "strengths": {
+        "text_in_image": 5,
+        "photoreal": 4,
+        "illustration": 4,
+        "diagram": 4,
+        "fast_bulk": 2
+      },
+      "typical_latency_s": 12,
+      "price": {
+        "per_image_usd": 0.19,
+        "per_image_usd_4k": null,
+        "confidence": "indicative",
+        "checked": "2026-08-25"
+      },
+      "availability": [
+        {
+          "provider": "azure",
+          "model_ref": "gpt-image-2",
+          "note": "GA on Azure OpenAI. Requires a deployment; the deployment name is looked up in config providers.azure.deployments and goes in the URL path, never in the request body."
+        },
+        {
+          "provider": "openrouter",
+          "model_ref": "openai/gpt-image-2"
+        }
+      ],
+      "max_size": "1536x1024",
+      "notes": "Pick it when words must be legible inside the image — labels, signage, UI mockups, a chart title baked into the picture. Do not pick it for bulk work: at ~$0.19 an image and roughly 12s a call it is the most expensive and slowest of the four, and twenty thumbnails cost more than the deck they go in. For an organisation this is also the model with the cleanest governance story, because Azure reaches it under Entra ID."
+    },
+    {
+      "id": "gemini-3.1-flash-image",
+      "display_name": "Nano Banana (Gemini 3.1 Flash Image)",
+      "family": "google",
+      "leaderboard": {
+        "source": "public image arena",
+        "rank_band": "top-3",
+        "checked": "2026-08-22"
+      },
+      "strengths": {
+        "text_in_image": 3,
+        "photoreal": 4,
+        "illustration": 5,
+        "diagram": 4,
+        "fast_bulk": 5
+      },
+      "typical_latency_s": 4,
+      "price": {
+        "per_image_usd": 0.039,
+        "per_image_usd_4k": 0.12,
+        "confidence": "indicative",
+        "checked": "2026-08-25"
+      },
+      "availability": [
+        {
+          "provider": "openrouter",
+          "model_ref": "google/gemini-3.1-flash-image"
+        },
+        {
+          "provider": "google",
+          "model_ref": "nano-banana",
+          "note": "Endpoint shape unverified: 2026 docs show POST /v1beta/interactions alongside the classic generateContent path. Reach it via OpenRouter until the Google adapter is confirmed against a live key."
+        }
+      ],
+      "max_size": "4K",
+      "notes": "The default workhorse: fast, cheap, and the strongest of the four on illustration and clean diagram-like output — which is exactly what deck and doc images usually are. Reported list price sits in the $0.02–$0.054 band at 1K depending on tier, so 0.039 is a mid-band estimate, and 4K lands around $0.12. Do not pick it when the image must contain readable text; expect garbled words at small sizes and add the labels as text boxes instead. A Pro tier exists at roughly $0.134 (1K/2K) and $0.24 (4K) for higher fidelity; it is not curated here yet."
+    },
+    {
+      "id": "grok-imagine-image-2.0",
+      "display_name": "Grok Imagine Image 2.0",
+      "family": "xai",
+      "leaderboard": {
+        "source": "public image arena",
+        "rank_band": "top-10",
+        "checked": "2026-08-22"
+      },
+      "strengths": {
+        "text_in_image": 3,
+        "photoreal": 4,
+        "illustration": 4,
+        "diagram": 3,
+        "fast_bulk": 5
+      },
+      "typical_latency_s": 5,
+      "price": {
+        "per_image_usd": 0.02,
+        "per_image_usd_4k": null,
+        "confidence": "indicative",
+        "checked": "2026-08-25"
+      },
+      "availability": [
+        {
+          "provider": "xai",
+          "model_ref": "grok-imagine-image-2.0",
+          "note": "OpenAI-SDK-compatible endpoint; up to 10 images per call. A pro tier lands around $0.05–$0.07."
+        },
+        {
+          "provider": "openrouter",
+          "model_ref": "xai/grok-imagine-image-2.0"
+        }
+      ],
+      "max_size": "1024x1024",
+      "notes": "The cheapest of the four at ~$0.02 an image, and it batches up to ten outputs per call — pick it when volume matters more than any single image. Do not pick it when the output size is load-bearing: the API takes an aspect ratio plus a resolution and has no size, quality or style parameter, so a requested 1536x1024 is approximated rather than honoured. Weakest of the set on structured diagrams."
+    },
+    {
+      "id": "flux-2-pro",
+      "display_name": "FLUX 2 Pro",
+      "family": "black-forest-labs",
+      "leaderboard": {
+        "source": "public image arena",
+        "rank_band": "top-10",
+        "checked": "2026-08-22"
+      },
+      "strengths": {
+        "text_in_image": 4,
+        "photoreal": 5,
+        "illustration": 4,
+        "diagram": 3,
+        "fast_bulk": 3
+      },
+      "typical_latency_s": 9,
+      "price": {
+        "per_image_usd": 0.055,
+        "per_image_usd_4k": null,
+        "confidence": "indicative",
+        "checked": "2026-08-25"
+      },
+      "availability": [
+        {
+          "provider": "openrouter",
+          "model_ref": "black-forest-labs/flux-2-pro"
+        }
+      ],
+      "max_size": "1440x1440",
+      "notes": "Strongest photorealism of the set, and second only to GPT Image 2 on embedded text — pick it for a hero photo or a product shot where a flash-tier render looks synthetic. Do not pick it as a bulk default: at ~$0.055 it is three times the price of Grok for work neither model's output quality decides. OpenRouter-only in the MVP; availability through the Azure AI Foundry model catalogue is unconfirmed."
+    }
+  ]
+}
