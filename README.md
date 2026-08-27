@@ -20,11 +20,16 @@ anything.
 
 What is **not** there yet:
 
-- **Only the OpenRouter adapter exists.** The config vocabulary already covers
-  Azure OpenAI (endpoint, deployment mapping, Entra auth), Google and xAI, and
-  `data/models.json` records their availability, but no adapter is registered
-  for them, so enabling one only makes `list_capabilities` say "no adapter for
-  this provider is registered in this build".
+- **Only the OpenRouter and Azure OpenAI adapters exist.** The config vocabulary
+  also covers Google and xAI, and `data/models.json` records their availability,
+  but no adapter is registered for them, so enabling one only makes
+  `list_capabilities` say "no adapter for this provider is registered in this
+  build".
+- **Azure authenticates with an API key, not yet with Entra ID.** The endpoint,
+  deployment mapping and both auth modes are implemented, but acquiring an Entra
+  token needs a credential library this build does not carry; with
+  `"auth": "entra"` a call fails with an `auth_failed` saying so. Set
+  `"auth": "api_key"` for now.
 - **The npm release predates the tools.** `imagine-mcp@0.0.1` on npm is the
   scaffold, not this. Until the next release, run it from a clone
   ([Development](#development)).
@@ -184,10 +189,10 @@ Everything the schema accepts, with the values it defaults to:
 | `default.use_case`           | One of `text_in_image`, `photoreal`, `illustration`, `diagram`, `fast_bulk`, or `null`.        |
 | `providers.<id>.enabled`     | Whether the router may route to it at all.                                                     |
 | `providers.<id>.api_key_env` | The **name** of the environment variable holding the key. Never the key itself.                |
-| `providers.<id>.endpoint`    | Resource URL, for providers that need one. Required when `auth` is `entra`. _(Azure: planned.)_ |
-| `providers.<id>.api_version` | API version string. _(Azure: planned.)_                                                        |
-| `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable. _(Azure: planned.)_                       |
-| `providers.<id>.deployments` | Model id → deployment name mapping. _(Azure: planned.)_                                        |
+| `providers.<id>.endpoint`    | Resource URL, for providers that need one. Required when `auth` is `entra`.                     |
+| `providers.<id>.api_version` | API version string. Azure defaults to `2025-04-01-preview`.                                    |
+| `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable, and is not implemented yet.                |
+| `providers.<id>.deployments` | Model id → deployment name mapping. Azure needs one entry per model you can reach.             |
 | `output.dir`                 | Where images are written. Relative paths resolve against the server's working directory.        |
 | `output.filename`            | Template over `{slug}`, `{hash}` and `{ext}`. Names a file, never a path.                      |
 | `output.manifest`            | JSONL log of every image. `null` falls back to `manifest.jsonl` inside the output directory.    |
@@ -202,10 +207,28 @@ the whole config object is therefore safe to log, and `list_capabilities` can
 report a missing credential by naming the variable without ever reading it. See
 [ADR 0004](docs/adr/0004-config-loading-and-key-resolution.md).
 
-Azure OpenAI, including the deployment-name mapping and Entra authentication, is
-designed for and reserved in the schema but **not implemented**; the same goes
-for Google and xAI. Enabling `providers.azure` today gets you a
-`not_configured` entry saying no adapter is registered.
+Azure OpenAI is implemented. Point it at your resource, name the key variable,
+and map each curated model id to the name of your deployment — the deployment
+name is arbitrary and is not the model id, which is why the mapping exists:
+
+```json
+{
+  "providers": {
+    "azure": {
+      "enabled": true,
+      "auth": "api_key",
+      "api_key_env": "AZURE_OPENAI_API_KEY",
+      "endpoint": "https://my-resource.openai.azure.com",
+      "deployments": { "gpt-image-2": "my-gpt-image-2" }
+    }
+  }
+}
+```
+
+Entra authentication is reserved in the schema but not implemented yet, so leave
+`auth` at `api_key`. Google and xAI are reserved too: enabling either today gets
+you a `not_configured` entry saying no adapter is registered. See
+[ADR 0014](docs/adr/0014-azure-openai-adapter.md).
 
 ## The three tools
 
@@ -460,7 +483,19 @@ profile. `list_capabilities` names exactly which variables it is missing.
 **`list_capabilities` shows a provider as `not_configured`** — read its `note`.
 "Disabled in configuration" means `providers.<id>.enabled` is `false`. "No
 adapter for this provider is registered in this build" means the provider is
-planned but not implemented; only OpenRouter is real today.
+planned but not implemented; OpenRouter and Azure OpenAI are the real ones
+today. "The adapter reports itself unconfigured" for Azure means one of the four
+things it needs is missing: `enabled`, `endpoint`, a credential, or at least one
+entry in `deployments`.
+
+**Azure fails with `provider_unavailable` and a 404** — the deployment name in
+`providers.azure.deployments` does not exist on that resource. The message names
+the deployment it tried; check it against the deployment list in Azure AI
+Foundry, and remember it is the *deployment* name, not the model name.
+
+**Azure fails with `auth_failed` mentioning issue #23** — `providers.azure.auth`
+is `entra`, which this build cannot get a token for. Switch to `api_key` and set
+the variable `api_key_env` names.
 
 **`"error": "invalid_request"` with "No image provider is available"** — nothing
 is both enabled and credentialled. Set `OPENROUTER_API_KEY`, or check that you
@@ -538,8 +573,8 @@ visible. See [ADR 0005](docs/adr/0005-two-schemas-for-curated-model-knowledge.md
 
 ## Planned features
 
-- Providers beyond OpenRouter: Azure OpenAI with deployment mapping and Entra
-  authentication, then Google Gemini and xAI Grok
+- Entra ID authentication for Azure OpenAI, then the Google Gemini and xAI Grok
+  adapters
 - A published npm release carrying the three tools, installable with `npx`
 - A local web portal for key management and a searchable gallery of everything
   generated, reading the manifest
