@@ -1,7 +1,13 @@
 # 7. Router selection and fallback
 
-**Status:** accepted
+**Status:** accepted, amended by [ADR 0013](0013-explicit-model-ref-at-the-adapter-seam.md)
 **Date:** 2026-08-26
+
+> **Amendment (ADR 0013).** "The resolved model reference travels to the adapter
+> in `provider_hint`" no longer holds. `ImageProvider.generate` takes the
+> resolved reference as a second argument, `ResolvedModel`, and the router
+> leaves `provider_hint` as the caller wrote it. Every other decision below
+> stands.
 
 ## Context
 
@@ -70,4 +76,5 @@ response envelope in PLAN.md §5.1 wants.
 Because the resolved reference overwrites `provider_hint`, an adapter must not
 read that field as a caller-supplied provider name. Adapters that ignore it and
 generate with a fixed model — `StubProvider` does — still work, but will report
-a model the router did not choose.
+a model the router did not choose. *(ADR 0013 removed the overwrite and gave
+`StubProvider` the resolved reference to report.)*

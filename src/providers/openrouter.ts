@@ -14,7 +14,7 @@ import type {
   NormalisedResult,
   ProviderModel,
 } from "../core/types.js";
-import type { ImageProvider } from "./types.js";
+import type { ImageProvider, ResolvedModel } from "./types.js";
 
 export const OPENROUTER_ID = "openrouter";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -36,7 +36,7 @@ export type FetchLike = typeof globalThis.fetch;
 export interface OpenRouterProviderOptions {
   /** `null` or absent means "not configured"; nothing is sent without it. */
   apiKey?: string | null;
-  /** Used when the request carries no full model id of its own. */
+  /** Used when the adapter is called without a router-resolved model. */
   model?: string;
   baseUrl?: string;
   fetch?: FetchLike;
@@ -80,9 +80,12 @@ export class OpenRouterProvider implements ImageProvider {
     }
   }
 
-  async generate(request: NormalisedRequest): Promise<NormalisedResult> {
+  async generate(
+    request: NormalisedRequest,
+    resolved?: ResolvedModel,
+  ): Promise<NormalisedResult> {
     const started = this.#now();
-    const model = this.#modelFor(request);
+    const model = resolved?.model_ref ?? this.#defaultModel;
     const body = buildGenerateBody(model, request);
 
     const payload = await this.#send(IMAGES_PATH, {
@@ -108,16 +111,6 @@ export class OpenRouterProvider implements ImageProvider {
       width: dimensions.width,
       height: dimensions.height,
     };
-  }
-
-  /**
-   * A `provider_hint` naming a full model id (`vendor/model`) is honoured;
-   * a hint naming this adapter itself is not a model and falls through.
-   */
-  #modelFor(request: NormalisedRequest): string {
-    const hint = request.provider_hint;
-    if (hint && hint.includes("/")) return hint;
-    return this.#defaultModel;
   }
 
   async #discoverModels(path: string): Promise<ProviderModel[]> {

@@ -186,8 +186,10 @@ describe("the generate_image tool", () => {
 
   it("records what the generation cost, using the curated estimate when the provider reports none", async () => {
     class PricelessProvider extends StubProvider {
-      override async generate(): Promise<NormalisedResult> {
-        return { ...(await super.generate()), cost_usd: null };
+      override async generate(
+        ...args: Parameters<StubProvider["generate"]>
+      ): Promise<NormalisedResult> {
+        return { ...(await super.generate(...args)), cost_usd: null };
       }
     }
 

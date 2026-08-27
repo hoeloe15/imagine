@@ -1,7 +1,13 @@
 # 9. The OpenRouter adapter
 
-**Status:** accepted
+**Status:** accepted, amended by [ADR 0013](0013-explicit-model-ref-at-the-adapter-seam.md)
 **Date:** 2026-08-26
+
+> **Amendment (ADR 0013).** The model no longer comes from `provider_hint`, and
+> the hint-contains-a-slash heuristic is gone. The adapter generates with the
+> `model_ref` the router passes as `ResolvedModel`, falling back to the
+> configured or built-in default when it is called without one. Every other
+> decision below stands.
 
 ## Context
 
@@ -22,11 +28,13 @@ headers and body, with no network and no recording harness. No HTTP mocking
 dependency is added for the same reason.
 
 **The model comes from `provider_hint` when it names one, otherwise from a
-configured default.** `NormalisedRequest` has no `model` field; the router
-passes its model choice through `provider_hint`, which PLAN.md §5.1 defines as
-either a provider id or a full model id. A hint containing `/` is treated as a
-model reference and sent as `model`; a hint naming the adapter itself is not a
-model and falls through to the default. The built-in default is
+configured default.** *(Superseded by ADR 0013: it comes from the router's
+`ResolvedModel`, otherwise from the default.)* `NormalisedRequest` has no
+`model` field; the router passes its model choice through `provider_hint`,
+which PLAN.md §5.1 defines as either a provider id or a full model id. A hint
+containing `/` is treated as a model reference and sent as `model`; a hint
+naming the adapter itself is not a model and falls through to the default. The
+built-in default is
 `google/gemini-3.1-flash-image` — the cheap, broadly capable model the plan
 already uses as its example of the sensible recommendation.
 

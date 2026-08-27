@@ -12,7 +12,7 @@ import type {
   NormalisedResult,
   ProviderModel,
 } from "../../src/core/types.js";
-import type { ImageProvider } from "../../src/providers/types.js";
+import type { ImageProvider, ResolvedModel } from "../../src/providers/types.js";
 import { StubProvider } from "../../src/providers/stub.js";
 
 const knowledge = loadBundledModelKnowledge();
@@ -33,7 +33,7 @@ function request(overrides: Partial<NormalisedRequest> = {}): NormalisedRequest 
 
 /** A stub under a real provider's id, recording what the router hands it. */
 class NamedStub implements ImageProvider {
-  readonly calls: NormalisedRequest[] = [];
+  readonly calls: { request: NormalisedRequest; resolved?: ResolvedModel }[] = [];
   private readonly stub: StubProvider;
 
   constructor(readonly id: string) {
@@ -48,14 +48,17 @@ class NamedStub implements ImageProvider {
     return this.stub.listModels();
   }
 
-  generate(givenRequest: NormalisedRequest): Promise<NormalisedResult> {
-    this.calls.push(givenRequest);
-    return this.stub.generate();
+  generate(
+    givenRequest: NormalisedRequest,
+    resolved?: ResolvedModel,
+  ): Promise<NormalisedResult> {
+    this.calls.push({ request: givenRequest, ...(resolved ? { resolved } : {}) });
+    return this.stub.generate(givenRequest, resolved);
   }
 }
 
 class FailingProvider implements ImageProvider {
-  readonly calls: NormalisedRequest[] = [];
+  readonly calls: { request: NormalisedRequest; resolved?: ResolvedModel }[] = [];
 
   constructor(
     readonly id: string,
@@ -70,8 +73,11 @@ class FailingProvider implements ImageProvider {
     return Promise.resolve([]);
   }
 
-  generate(givenRequest: NormalisedRequest): Promise<NormalisedResult> {
-    this.calls.push(givenRequest);
+  generate(
+    givenRequest: NormalisedRequest,
+    resolved?: ResolvedModel,
+  ): Promise<NormalisedResult> {
+    this.calls.push({ request: givenRequest, ...(resolved ? { resolved } : {}) });
     return Promise.reject(this.failure);
   }
 }
@@ -286,9 +292,8 @@ describe("route", () => {
       model: "gemini-3.1-flash-image",
     });
     expect(openrouter.calls[0]).toMatchObject({
-      provider_hint: "google/gemini-3.1-flash-image",
-      size: "1024x1024",
-      prompt: "a regional distribution network",
+      request: { size: "1024x1024", prompt: "a regional distribution network" },
+      resolved: { model_ref: "google/gemini-3.1-flash-image" },
     });
     expect(outcome.selection_reason).toContain("use_case=illustration");
     expect(outcome.attempts).toEqual([
@@ -310,7 +315,23 @@ describe("route", () => {
       providers: [openrouter],
     });
 
-    expect(openrouter.calls[0]?.size).toBe("1536x1024");
+    expect(openrouter.calls[0]?.request.size).toBe("1536x1024");
+  });
+
+  it("hands the adapter the caller's hint untouched, beside the resolved model", async () => {
+    const openrouter = new NamedStub("openrouter");
+
+    await route({
+      request: request({ provider_hint: "gemini-3.1-flash-image" }),
+      config: config(),
+      knowledge,
+      providers: [openrouter],
+    });
+
+    expect(openrouter.calls[0]?.request.provider_hint).toBe("gemini-3.1-flash-image");
+    expect(openrouter.calls[0]?.resolved).toEqual({
+      model_ref: "google/gemini-3.1-flash-image",
+    });
   });
 
   it("says in selection_reason that a hint was not honoured", async () => {

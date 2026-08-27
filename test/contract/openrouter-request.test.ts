@@ -104,20 +104,20 @@ describe("OpenRouter request shape — generate", () => {
     });
   });
 
-  it("honours a provider_hint that names a full model id", async () => {
+  it("sends the model the router resolved", async () => {
     const { provider, fetch } = providerWith([jsonResponse(IMAGE_RESPONSE)]);
 
-    await provider.generate({ prompt: "x", provider_hint: "openai/gpt-image-2" });
+    await provider.generate({ prompt: "x" }, { model_ref: "openai/gpt-image-2" });
 
     expect(JSON.parse(String(fetch.calls[0]?.init.body))).toMatchObject({
       model: "openai/gpt-image-2",
     });
   });
 
-  it("ignores a provider_hint that names the adapter rather than a model", async () => {
+  it("never reads provider_hint as a model reference", async () => {
     const { provider, fetch } = providerWith([jsonResponse(IMAGE_RESPONSE)]);
 
-    await provider.generate({ prompt: "x", provider_hint: "openrouter" });
+    await provider.generate({ prompt: "x", provider_hint: "openai/gpt-image-2" });
 
     expect(JSON.parse(String(fetch.calls[0]?.init.body))).toMatchObject({
       model: "google/gemini-3.1-flash-image",

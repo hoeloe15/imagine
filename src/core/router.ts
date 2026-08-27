@@ -191,11 +191,13 @@ export async function route(options: RouteOptions): Promise<RoutingOutcome> {
     if (provider === undefined) continue;
     triedProviders.add(candidate.provider);
 
-    const request = requestFor(options.request, options.config, candidate);
+    const request = requestFor(options.request, options.config);
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       await options.budgetPrecheck?.(candidate);
       try {
-        const result = await provider.generate(request);
+        const result = await provider.generate(request, {
+          model_ref: candidate.model_ref,
+        });
         attempts.push({ ...attemptKey(candidate), attempt, outcome: "succeeded" });
         return {
           result,
@@ -227,21 +229,15 @@ export async function route(options: RouteOptions): Promise<RoutingOutcome> {
 }
 
 /**
- * The request as the chosen adapter receives it: size defaulted from config,
- * and `provider_hint` narrowed to the resolved model reference. `ImageProvider`
- * has no model parameter of its own, so the resolved reference travels in the
- * field the caller's hint arrived in — by the time an adapter sees a request,
- * the hint has stopped being a hint. See ADR 0007.
+ * The request as the chosen adapter receives it: the caller's own request with
+ * the size defaulted from config. `provider_hint` stays the caller's hint; the
+ * model the router resolved travels beside the request as `ResolvedModel`. See
+ * ADR 0013.
  */
-function requestFor(
-  request: NormalisedRequest,
-  config: Config,
-  candidate: RouteCandidate,
-): NormalisedRequest {
+function requestFor(request: NormalisedRequest, config: Config): NormalisedRequest {
   return {
     ...request,
     size: request.size ?? config.default.size,
-    provider_hint: candidate.model_ref,
   };
 }
 

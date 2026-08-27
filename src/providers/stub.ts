@@ -1,5 +1,9 @@
-import type { NormalisedResult, ProviderModel } from "../core/types.js";
-import type { ImageProvider } from "./types.js";
+import type {
+  NormalisedRequest,
+  NormalisedResult,
+  ProviderModel,
+} from "../core/types.js";
+import type { ImageProvider, ResolvedModel } from "./types.js";
 
 const ONE_PIXEL_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -31,7 +35,10 @@ export class StubProvider implements ImageProvider {
     return Promise.resolve([STUB_MODEL]);
   }
 
-  generate(): Promise<NormalisedResult> {
+  generate(
+    request: NormalisedRequest,
+    resolved?: ResolvedModel,
+  ): Promise<NormalisedResult> {
     const started = Date.now();
     const bytes = new Uint8Array(Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"));
 
@@ -39,7 +46,7 @@ export class StubProvider implements ImageProvider {
       bytes,
       mime_type: "image/png",
       provider: this.id,
-      model: STUB_MODEL.id,
+      model: resolved?.model_ref ?? STUB_MODEL.id,
       cost_usd: 0,
       duration_ms: Date.now() - started,
       width: 1,
