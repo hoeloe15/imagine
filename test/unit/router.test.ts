@@ -96,6 +96,10 @@ function filtered(): ImagineError {
   return new ImagineError("content_filtered", "prompt rejected by policy");
 }
 
+function authFailed(): ImagineError {
+  return new ImagineError("auth_failed", "401 from provider: invalid API key");
+}
+
 describe("usableProviders", () => {
   it("drops providers that are disabled in config or report themselves unconfigured", () => {
     const usable = usableProviders(
@@ -412,6 +416,92 @@ describe("route", () => {
 
     expect(openrouter.calls).toHaveLength(1);
     expect(azure.calls).toHaveLength(0);
+  });
+
+  it.each([
+    new ImagineError("invalid_request", "size not supported"),
+    new ImagineError("budget_exceeded", "session limit of $5.00 reached"),
+    new ImagineError("unknown", "something the adapter could not classify"),
+  ])("keeps $reason a request-level refusal, with no other provider tried", async (
+    failure,
+  ) => {
+    const openrouter = new FailingProvider("openrouter", failure);
+    const azure = new NamedStub("azure");
+
+    await expect(
+      route({
+        request: request({ use_case: "text_in_image" }),
+        config: config(),
+        knowledge,
+        providers: [openrouter, azure],
+      }),
+    ).rejects.toMatchObject({ name: "ImagineError", reason: failure.reason });
+
+    expect(openrouter.calls).toHaveLength(1);
+    expect(azure.calls).toHaveLength(0);
+  });
+
+  it("serves a hint-less request through azure when openrouter's key is rejected", async () => {
+    const openrouter = new FailingProvider("openrouter", authFailed());
+    const azure = new NamedStub("azure");
+
+    const outcome = await route({
+      request: request(),
+      config: config(),
+      knowledge,
+      providers: [openrouter, azure],
+    });
+
+    expect(outcome.selected.provider).toBe("azure");
+    expect(outcome.result.provider).toBe("azure");
+    expect(azure.calls).toHaveLength(1);
+    expect(outcome.selection_reason).toContain("openrouter");
+    expect(outcome.selection_reason).toContain("auth_failed");
+    expect(outcome.selection_reason).toContain("invalid API key");
+  });
+
+  it("does not retry a provider that rejected the credentials, and records the skip", async () => {
+    const openrouter = new FailingProvider("openrouter", authFailed());
+    const azure = new NamedStub("azure");
+
+    const outcome = await route({
+      request: request({ use_case: "text_in_image" }),
+      config: config(),
+      knowledge,
+      providers: [openrouter, azure],
+    });
+
+    expect(openrouter.calls).toHaveLength(1);
+    expect(outcome.attempts).toEqual([
+      expect.objectContaining({
+        provider: "openrouter",
+        attempt: 1,
+        outcome: "failed",
+        failure: expect.objectContaining({ reason: "auth_failed", billed: false }),
+      }),
+      expect.objectContaining({ provider: "azure", outcome: "succeeded" }),
+    ]);
+  });
+
+  it("reports auth_failed when every provider's credentials are rejected", async () => {
+    const openrouter = new FailingProvider("openrouter", authFailed());
+    const azure = new FailingProvider("azure", authFailed());
+
+    await expect(
+      route({
+        request: request({ use_case: "text_in_image" }),
+        config: config(),
+        knowledge,
+        providers: [openrouter, azure],
+      }),
+    ).rejects.toMatchObject({
+      name: "ImagineError",
+      reason: "auth_failed",
+      message: expect.stringContaining("openrouter"),
+    });
+
+    expect(openrouter.calls).toHaveLength(1);
+    expect(azure.calls).toHaveLength(1);
   });
 
   it("reports the whole trail when every provider fails", async () => {

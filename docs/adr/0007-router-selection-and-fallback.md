@@ -1,6 +1,8 @@
 # 7. Router selection and fallback
 
-**Status:** accepted, amended by [ADR 0013](0013-explicit-model-ref-at-the-adapter-seam.md)
+**Status:** accepted, amended by
+[ADR 0013](0013-explicit-model-ref-at-the-adapter-seam.md) and
+[ADR 0015](0015-provider-condemning-versus-request-condemning-failures.md)
 **Date:** 2026-08-26
 
 > **Amendment (ADR 0013).** "The resolved model reference travels to the adapter
@@ -8,6 +10,15 @@
 > resolved reference as a second argument, `ResolvedModel`, and the router
 > leaves `provider_hint` as the caller wrote it. Every other decision below
 > stands.
+>
+> **Amendment (ADR 0015).** "Only retryable failures cause a fallback" no longer
+> holds for `auth_failed`. Non-retryable failures are now split in two:
+> `auth_failed` condemns the *provider*, so the router excludes it (without the
+> retry) and continues down the candidate list, naming the exclusion in the
+> attempt trail and in `selection_reason`; `content_filtered`,
+> `invalid_request`, `budget_exceeded` and `unknown` condemn the *request* and
+> still end it immediately, exactly as described below. ADR 0015 carries the
+> full reason-by-reason table.
 
 ## Context
 
@@ -29,7 +40,8 @@ that provider's own namespace, and an adapter is entitled to treat it as such.
 Adding a `model` field to the seam types would be the cleaner shape, but it
 would change a type three other issues are already building against.
 
-**Only retryable failures cause a fallback.** A transient failure gets one
+**Only retryable failures cause a fallback.** *(Amended by ADR 0015 for
+`auth_failed`.)* A transient failure gets one
 immediate retry against the same provider; if it fails again the router moves to
 the next provider in the chain. A failure the adapter marked non-retryable —
 `content_filtered`, `invalid_request`, `auth_failed`, `budget_exceeded`,

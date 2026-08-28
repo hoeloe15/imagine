@@ -165,12 +165,27 @@ export function planCandidates(
 }
 
 /**
+ * Reasons that condemn the *provider* rather than the request: nothing about
+ * the request changes the answer, and the next provider in the chain is free to
+ * succeed. Failing over is not a gamble with the caller's money here — the
+ * condemned provider could not have billed for a call it never authorised.
+ * See ADR 0015.
+ */
+const PROVIDER_CONDEMNING: ReadonlySet<FailureReason> = new Set(["auth_failed"]);
+
+function condemnsProvider(reason: FailureReason): boolean {
+  return PROVIDER_CONDEMNING.has(reason);
+}
+
+/**
  * Select, call, and fall back. Transient failures get one retry against the
  * same provider; a candidate that fails twice — or a provider already tried —
- * is skipped in favour of the next provider in the chain. A failure the adapter
- * marks non-retryable ends the request: another provider will not fix a
- * malformed prompt, a filtered subject or a budget refusal, and trying one
- * anyway spends money on the caller's behalf without being asked.
+ * is skipped in favour of the next provider in the chain. A failure that
+ * condemns the provider (see {@link PROVIDER_CONDEMNING}) skips the retry and
+ * moves straight to the next provider. Every other non-retryable failure ends
+ * the request: another provider will not fix a malformed prompt, a filtered
+ * subject or a budget refusal, and trying one anyway spends money on the
+ * caller's behalf without being asked.
  */
 export async function route(options: RouteOptions): Promise<RoutingOutcome> {
   const plan = planCandidates(options);
@@ -219,8 +234,9 @@ export async function route(options: RouteOptions): Promise<RoutingOutcome> {
             billed: failure.billed,
           },
         });
-        if (!failure.retryable) throw failure;
         lastFailure = failure;
+        if (condemnsProvider(failure.reason)) break;
+        if (!failure.retryable) throw failure;
       }
     }
   }
@@ -474,7 +490,31 @@ function describeSelection(
       .join(", then ");
     parts.push(`fell back to ${selected.provider} after ${trail}`);
   }
+
+  const excluded = describeExclusions(attempts);
+  if (excluded !== undefined) parts.push(excluded);
   return parts.join("; ");
+}
+
+/**
+ * Names every provider dropped from the chain and what condemned it, so the
+ * caller can see that a provider was excluded rather than merely unlucky — and
+ * can go fix the credentials.
+ */
+function describeExclusions(attempts: readonly RouteAttempt[]): string | undefined {
+  const condemned = attempts.filter(
+    (attempt) =>
+      attempt.failure !== undefined && condemnsProvider(attempt.failure.reason),
+  );
+  if (condemned.length === 0) return undefined;
+
+  const detail = condemned
+    .map(
+      (attempt) =>
+        `${attempt.provider} (${attempt.failure?.reason}: ${attempt.failure?.message})`,
+    )
+    .join("; ");
+  return `excluded for this request: ${detail}`;
 }
 
 function attemptKey(
@@ -509,10 +549,13 @@ function exhausted(
     )
     .join(", ");
   const billed = attempts.some((attempt) => attempt.failure?.billed === true);
+  const excluded = describeExclusions(attempts);
 
   return new ImagineError(
     lastFailure?.reason ?? "provider_unavailable",
-    `Every available provider failed: ${trail}. No provider is left to fall back to.`,
+    `Every available provider failed: ${trail}. No provider is left to fall back to.${
+      excluded === undefined ? "" : ` Providers ${excluded}.`
+    }`,
     { retryable: lastFailure?.retryable ?? false, billed, cause: lastFailure },
   );
 }
