@@ -166,6 +166,37 @@ One caveat worth knowing before you share the URL with a colleague:
 single bucket shared by everyone talking to that server rather than a per-person
 cap. `max_usd_per_day` behaves the same way.
 
+### Running it in a container
+
+[`Containerfile`](Containerfile) builds the image the Azure deployment runs, and
+it works the same on your own machine:
+
+```sh
+docker build -f Containerfile -t imagine .
+docker run --rm -p 8080:8080 -e OPENROUTER_API_KEY=... imagine
+```
+
+That serves `http://127.0.0.1:8080/mcp` and `http://127.0.0.1:8080/healthz`. The
+image sets `IMAGINE_TRANSPORT=http` and `IMAGINE_HTTP_HOST=0.0.0.0` — binding
+wide is correct inside a container and nowhere else — runs as an unprivileged
+user, and listens on `IMAGINE_HTTP_PORT`, falling back to `PORT` (the Container
+Apps convention) and then `8080`. The warning above still applies: nothing in
+the image authenticates the endpoint.
+
+Images, the manifest and the cost ledger are written to `/app/imagine-output`.
+Mount something there to keep them, and mount something writable there if you
+run with `--read-only`:
+
+```sh
+docker run --rm -p 8080:8080 --read-only \
+  --tmpfs /app/imagine-output:uid=1000,gid=1000 \
+  -e OPENROUTER_API_KEY=... imagine
+```
+
+Published images are at `ghcr.io/hoeloe15/imagine` — `latest` and the version
+for a release, `edge` for the current `main`. See
+[ADR 0018](docs/adr/0018-the-container-image.md).
+
 ## Configuring it
 
 Configuration is optional. The bundled defaults are a working zero-config setup:
@@ -604,6 +635,7 @@ To run the local build as a server, point your MCP client at
 | `src/providers/` | one adapter per image provider                  |
 | `data/`          | curated model knowledge (`models.json`)         |
 | `schema/`        | JSON Schema for the user config file            |
+| `deploy/`        | the container entrypoint (see `Containerfile`)  |
 | `test/`          | `unit/`, `contract/`, `live/` and `e2e/` suites |
 
 ## Curated model knowledge

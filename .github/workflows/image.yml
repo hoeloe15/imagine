@@ -1,0 +1,92 @@
+name: Image
+
+# Kept out of ci.yml so the lint/test loop stays fast: this job builds a
+# container and is the only place a broken Containerfile is caught before
+# `azd up` finds it. Pull requests build and smoke-test without pushing.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  release:
+    types: [published]
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Containerfile
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          load: true
+          tags: imagine:smoke-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The container serves /healthz as a non-root user
+        run: |
+          docker run -d --name imagine-smoke -p 8080:8080 imagine:smoke-test
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          echo
+          test "$(docker exec imagine-smoke id -u)" != 0
+          test "${healthy:-0}" = 1
+          docker rm -f imagine-smoke
+
+      - name: No credential is baked into a layer
+        run: |
+          ! docker history --no-trunc --format '{{.CreatedBy}}' imagine:smoke-test \
+            | grep -Ei 'API_KEY=[^$]|SECRET=[^$]|BEGIN [A-Z ]*PRIVATE KEY'
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        if: github.event_name != 'pull_request'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release' }}
+            type=edge,branch=main
+            type=sha,format=long
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

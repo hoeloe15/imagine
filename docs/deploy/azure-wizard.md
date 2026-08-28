@@ -5,7 +5,8 @@ human at a keyboard. It covers only the parts a human must do: the sign-ins, the
 subscription choice, the one secret, and the client connection. Everything else
 is `azd`'s job.
 
-**Nothing in Phase 3 is implemented yet.** Steps that depend on unmerged work say
+**Almost nothing in Phase 3 is implemented yet** — the container image (#39) is
+the exception. Steps that depend on unmerged work say
 so, by issue number, rather than pretending. Do not follow this end to end
 today; follow it as those issues land, and correct it where reality disagrees —
 a runbook that was never executed is a wish list.
@@ -51,6 +52,24 @@ winget install --exact --id Docker.DockerDesktop
 Docker Desktop must actually be **running** — `azd` builds the image locally and
 pushes it to the registry. A stopped Docker daemon produces an `azd up` failure
 several minutes in.
+
+The image is built from [`Containerfile`](../../Containerfile), not a
+`Dockerfile`, so the `azure.yaml` that #40 adds has to name it explicitly
+(`docker: { path: ./Containerfile }`). Prove the build before you provision
+anything — it is a minute here versus ten minutes into `azd up`:
+
+```powershell
+docker build -f Containerfile -t imagine:local .
+docker run --rm -d -p 8080:8080 --name imagine-local imagine:local
+curl.exe -s http://127.0.0.1:8080/healthz
+docker rm -f imagine-local
+```
+
+Expect `{"status":"ok",...}`. The image already sets `IMAGINE_TRANSPORT=http`,
+`IMAGINE_HTTP_HOST=0.0.0.0` and a port that follows Container Apps' `PORT`, so
+the container app needs no transport environment of its own — only the provider
+key from Key Vault (§6). Health probes go on `/healthz` and never on `/mcp`
+(ADR 0018).
 
 **Cost.** A Container Apps environment with min replicas 1 (which the template
 sets deliberately — scale-to-zero cold starts are visible inside a tool call and
