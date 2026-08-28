@@ -422,24 +422,25 @@ describe("route", () => {
     new ImagineError("invalid_request", "size not supported"),
     new ImagineError("budget_exceeded", "session limit of $5.00 reached"),
     new ImagineError("unknown", "something the adapter could not classify"),
-  ])("keeps $reason a request-level refusal, with no other provider tried", async (
-    failure,
-  ) => {
-    const openrouter = new FailingProvider("openrouter", failure);
-    const azure = new NamedStub("azure");
+  ])(
+    "keeps $reason a request-level refusal, with no other provider tried",
+    async (failure) => {
+      const openrouter = new FailingProvider("openrouter", failure);
+      const azure = new NamedStub("azure");
 
-    await expect(
-      route({
-        request: request({ use_case: "text_in_image" }),
-        config: config(),
-        knowledge,
-        providers: [openrouter, azure],
-      }),
-    ).rejects.toMatchObject({ name: "ImagineError", reason: failure.reason });
+      await expect(
+        route({
+          request: request({ use_case: "text_in_image" }),
+          config: config(),
+          knowledge,
+          providers: [openrouter, azure],
+        }),
+      ).rejects.toMatchObject({ name: "ImagineError", reason: failure.reason });
 
-    expect(openrouter.calls).toHaveLength(1);
-    expect(azure.calls).toHaveLength(0);
-  });
+      expect(openrouter.calls).toHaveLength(1);
+      expect(azure.calls).toHaveLength(0);
+    },
+  );
 
   it("serves a hint-less request through azure when openrouter's key is rejected", async () => {
     const openrouter = new FailingProvider("openrouter", authFailed());

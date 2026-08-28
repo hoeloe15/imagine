@@ -117,6 +117,55 @@ file path to put in your document.
 answers with a failure envelope naming the variable it wanted — a client that
 cannot start the server cannot show you why.
 
+## Running over HTTP
+
+Stdio is the default and is what you want on your own machine. For a server on
+another machine — a box on the LAN, a tunnel, a container — the same binary also
+speaks MCP over Streamable HTTP:
+
+```sh
+node dist/index.js --http
+# or: IMAGINE_TRANSPORT=http node dist/index.js
+```
+
+That serves one MCP endpoint at `http://127.0.0.1:3000/mcp`, accepting POST, and
+a separate health endpoint at `http://127.0.0.1:3000/healthz`. Point Claude Code
+at it with:
+
+```sh
+claude mcp add --transport http imagine http://127.0.0.1:3000/mcp
+```
+
+> ### ⚠️ The HTTP endpoint is UNAUTHENTICATED
+>
+> There is no authentication in this transport. Anyone who can reach the port
+> can generate images, **spend your provider credits** and read the files the
+> server writes. It binds to `127.0.0.1` for that reason, and it prints the same
+> warning every time it starts. Do not put it on a public address without an
+> authenticating proxy in front of it. Endpoint authentication is planned work,
+> not a setting you are missing.
+
+Four environment variables configure it:
+
+| Variable                       | Default     | What it does                                                       |
+| ------------------------------ | ----------- | ------------------------------------------------------------------ |
+| `IMAGINE_TRANSPORT`            | `stdio`     | `http` starts the HTTP listener instead of stdio                   |
+| `IMAGINE_HTTP_HOST`            | `127.0.0.1` | Bind address. Widening it is an explicit choice                    |
+| `IMAGINE_HTTP_PORT`            | `3000`      | Port. `0` picks a free one and prints it                           |
+| `IMAGINE_HTTP_ALLOWED_ORIGINS` | *(empty)*   | Comma-separated browser origins allowed to call `/mcp`             |
+
+Requests are handled statelessly: no sessions, nothing kept between calls. A
+browser request whose `Origin` is neither the server's own nor a loopback
+address nor on the allow-list gets a `403`, which is what blocks DNS rebinding.
+Requests with no `Origin` — every desktop MCP client — are unaffected. A `GET` on
+`/mcp` answers `405`; probe `/healthz` instead. See
+[ADR 0016](docs/adr/0016-streamable-http-transport.md).
+
+One caveat worth knowing before you share the URL with a colleague:
+`budget.max_usd_per_session` is enforced per process, so over HTTP it becomes a
+single bucket shared by everyone talking to that server rather than a per-person
+cap. `max_usd_per_day` behaves the same way.
+
 ## Configuring it
 
 Configuration is optional. The bundled defaults are a working zero-config setup:
@@ -548,7 +597,8 @@ To run the local build as a server, point your MCP client at
 
 | Path             | What lives there                                |
 | ---------------- | ----------------------------------------------- |
-| `src/index.ts`   | binary entry point: starts the stdio server     |
+| `src/index.ts`   | binary entry point: picks stdio or HTTP         |
+| `src/transport/` | the HTTP listener, routing and origin checks    |
 | `src/mcp/`       | MCP protocol wiring and tool definitions        |
 | `src/core/`      | router, config, knowledge, budget, output       |
 | `src/providers/` | one adapter per image provider                  |
