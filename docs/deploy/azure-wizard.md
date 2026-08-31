@@ -238,6 +238,44 @@ Rotation later is this same pair of commands and nothing else.
 
 ---
 
+## 6b. Turn on token validation
+
+The container validates every bearer token itself (ADR 0017). It does that only
+once these environment variables are set on the container app — with none of
+them set, the endpoint is open, which is correct locally and wrong here.
+
+```powershell
+$rg     = azd env get-value AZURE_RESOURCE_GROUP
+$app    = azd env get-value AZURE_CONTAINER_APP_NAME
+$tenant = az account show --query tenantId -o tsv
+$fqdn   = azd env get-value MCP_ENDPOINT_URL
+
+az containerapp update --name $app --resource-group $rg --set-env-vars `
+  IMAGINE_AUTH_TENANT_ID=$tenant `
+  "IMAGINE_AUTH_AUDIENCE=$fqdn/mcp,api://$(azd env get-value AZURE_MCP_APP_ID)" `
+  IMAGINE_AUTH_REQUIRED_SCOPE=access_as_user
+```
+
+Two audiences, because two clients ask for two different resources: Claude sends
+the **full MCP URL including `/mcp`** as the RFC 8707 `resource`, while
+`az account get-access-token --resource "api://<app-id>"` gets you the default
+one. Both must be Application ID URIs on the app registration — under **Expose an
+API**, add `https://<fqdn>/mcp` exactly, no trailing slash — or the token request
+fails with `AADSTS9010010` (research §3.3). This is the single most likely thing
+to break the demo.
+
+`access_as_user` must exist as a delegated scope on that app registration, and be
+consented to. An autonomous agent with its own service principal gets an **app
+role** of the same name instead; the server accepts either.
+
+The banner on the container's stderr says which mode it is in. `az containerapp
+logs show --name $app --resource-group $rg` should show `AUTHENTICATED: every
+POST to /mcp needs a Microsoft Entra ID bearer token` and the tenant, issuer,
+audience and scope underneath it. If it still shows the block-capital
+UNAUTHENTICATED warning, the variables did not reach the running revision.
+
+---
+
 ## 7. Verify the deployed endpoint
 
 Three checks, in order. Do not skip to the client until all three pass — the
@@ -294,6 +332,33 @@ If instead you get `AADSTS9010010` when acquiring the token, the endpoint URL is
 not registered as an Application ID URI on the app registration. Add it under
 **Expose an API → Application ID URI**, exactly, including the `/mcp` path and
 with no trailing slash. See #44.
+
+**7d. It refuses what it should refuse.** The rejection paths are unit-tested
+with locally minted keys, but only a live tenant proves the deployed
+configuration. Three tokens, all of which must fail:
+
+```powershell
+# A token for a resource this server does not accept: expect 401, invalid_token.
+$wrong = az account get-access-token --resource "https://graph.microsoft.com" --query accessToken -o tsv
+curl.exe -i -X POST "$fqdn/mcp" -H "Content-Type: application/json" `
+  -H "Accept: application/json, text/event-stream" -H "Authorization: Bearer $wrong" -d "{}"
+
+# A mangled signature: expect 401, invalid_token.
+curl.exe -i -X POST "$fqdn/mcp" -H "Content-Type: application/json" `
+  -H "Accept: application/json, text/event-stream" -H "Authorization: Bearer $($token)x" -d "{}"
+
+# No token at all: expect 401 and a bare `WWW-Authenticate: Bearer` challenge.
+curl.exe -i -X POST "$fqdn/mcp" -H "Content-Type: application/json" -d "{}"
+```
+
+An expired token is the fourth case and needs no special ceremony: keep the token
+from 7c for an hour and repeat the call, which must then answer `401`. A caller
+who is authenticated but lacks `access_as_user` gets `403` with
+`error="insufficient_scope"` — remove the consent, or use a service principal
+without the app role, to see it.
+
+If any of these returns `200`, stop and treat it as a security finding: the
+container is not enforcing what step 6b configured.
 
 ---
 

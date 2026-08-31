@@ -18,6 +18,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Env } from "../core/config.js";
 import { version } from "../version.js";
+import { bearerChallenge, type Authenticator, type CallerIdentity } from "./auth.js";
 
 export const MCP_PATH = "/mcp";
 export const HEALTH_PATH = "/healthz";
@@ -30,13 +31,32 @@ export interface HttpSettings {
   allowedOrigins: readonly string[];
 }
 
+/**
+ * What the transport knows about one request by the time a tool could run.
+ * `caller` is `null` exactly when no authenticator is configured. Issue #45
+ * consumes it to key the cost ledger and per-caller budgets.
+ */
+export interface RequestContext {
+  caller: CallerIdentity | null;
+}
+
 export interface HttpTransportOptions extends Partial<HttpSettings> {
   /**
    * Called once per POST. Request handling is stateless, so every request gets
    * its own `McpServer` over its own transport and nothing survives the
    * response; the dependencies behind it are shared and immutable.
    */
-  createServer: () => McpServer;
+  createServer: (context: RequestContext) => McpServer;
+  /**
+   * Checks the `Authorization` header before any tool can run. Omitted means
+   * the endpoint is open, which is the local mode.
+   */
+  authenticate?: Authenticator;
+  /**
+   * Extra `WWW-Authenticate` parameters on a 401. Issue #36 puts
+   * `resource_metadata` here so the hosted Claude surfaces can start OAuth.
+   */
+  challengeParams?: Readonly<Record<string, string>>;
 }
 
 export interface RunningHttpServer {
@@ -123,7 +143,7 @@ export async function startHttpServer(
   const allowedOrigins = options.allowedOrigins ?? [];
 
   const httpServer = createNodeHttpServer((req, res) => {
-    void route(req, res, options.createServer, allowedOrigins);
+    void route(req, res, options, allowedOrigins);
   });
 
   const port = await listen(httpServer, host, requestedPort);
@@ -164,7 +184,7 @@ function formatAuthority(host: string, port: number): string {
 async function route(
   req: IncomingMessage,
   res: ServerResponse,
-  createServer: () => McpServer,
+  options: HttpTransportOptions,
   allowedOrigins: readonly string[],
 ): Promise<void> {
   try {
@@ -203,7 +223,10 @@ async function route(
       return;
     }
 
-    await handleMcpPost(req, res, createServer);
+    const caller = await authenticated(req, res, options);
+    if (caller === REFUSED) return;
+
+    await handleMcpPost(req, res, () => options.createServer({ caller }));
   } catch (error) {
     if (!res.headersSent) {
       sendRpcError(res, 500, -32603, `Internal server error: ${describe(error)}`);
@@ -220,6 +243,28 @@ function handleHealth(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
   sendJson(res, 200, { status: "ok", name: "imagine", version });
+}
+
+const REFUSED = Symbol("refused");
+
+/**
+ * An authentication failure is a transport-level status with a challenge, never
+ * a tool-level error envelope: the client has to see a 401 to know it should go
+ * and get a token.
+ */
+async function authenticated(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: HttpTransportOptions,
+): Promise<CallerIdentity | null | typeof REFUSED> {
+  if (!options.authenticate) return null;
+
+  const outcome = await options.authenticate(header(req, "authorization"));
+  if (outcome.ok) return outcome.caller;
+
+  res.setHeader("WWW-Authenticate", bearerChallenge(outcome, options.challengeParams));
+  sendRpcError(res, outcome.status, -32600, outcome.message);
+  return REFUSED;
 }
 
 async function handleMcpPost(

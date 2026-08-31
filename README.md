@@ -136,16 +136,16 @@ at it with:
 claude mcp add --transport http imagine http://127.0.0.1:3000/mcp
 ```
 
-> ### ⚠️ The HTTP endpoint is UNAUTHENTICATED
+> ### ⚠️ The HTTP endpoint is UNAUTHENTICATED until you configure a tenant
 >
-> There is no authentication in this transport. Anyone who can reach the port
-> can generate images, **spend your provider credits** and read the files the
-> server writes. It binds to `127.0.0.1` for that reason, and it prints the same
-> warning every time it starts. Do not put it on a public address without an
-> authenticating proxy in front of it. Endpoint authentication is planned work,
-> not a setting you are missing.
+> Out of the box there is no authentication. Anyone who can reach the port can
+> generate images, **spend your provider credits** and read the files the server
+> writes. It binds to `127.0.0.1` for that reason, and it prints the same warning
+> every time it starts. Before putting it on an address anyone else can reach,
+> set the `IMAGINE_AUTH_*` variables below — the banner then flips to say what it
+> is enforcing.
 
-Four environment variables configure it:
+Four environment variables configure the listener:
 
 | Variable                       | Default     | What it does                                                       |
 | ------------------------------ | ----------- | ------------------------------------------------------------------ |
@@ -160,6 +160,41 @@ address nor on the allow-list gets a `403`, which is what blocks DNS rebinding.
 Requests with no `Origin` — every desktop MCP client — are unaffected. A `GET` on
 `/mcp` answers `405`; probe `/healthz` instead. See
 [ADR 0016](docs/adr/0016-streamable-http-transport.md).
+
+### Requiring a Microsoft Entra ID token
+
+Set these and every POST to `/mcp` must carry a bearer token this server has
+verified itself — signature against the tenant's published keys, issuer,
+audience, tenant, expiry and permission — before any tool runs. `/healthz` stays
+open so probes keep working.
+
+| Variable                      | Default                                             | What it does                                                        |
+| ----------------------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
+| `IMAGINE_AUTH_TENANT_ID`      | *(empty — auth off)*                                | The Entra tenant whose signing keys and `tid` are accepted           |
+| `IMAGINE_AUTH_AUDIENCE`       | *(required once auth is on)*                        | Accepted `aud`, comma-separated. Include the MCP URL itself          |
+| `IMAGINE_AUTH_ISSUER`         | `https://login.microsoftonline.com/<tenant>/v2.0`   | Accepted `iss`                                                       |
+| `IMAGINE_AUTH_REQUIRED_SCOPE` | `access_as_user`                                    | Accepted `scp` entries or app `roles` entries; any one is enough     |
+
+With none of them set the endpoint is open, exactly as before. With some of them
+set but not the tenant or the audience, the server refuses to start rather than
+quietly serving an open endpoint.
+
+A request with no token, an expired one, one minted for another audience, tenant
+or issuer, or one whose signature does not check out gets a `401` with a
+`WWW-Authenticate: Bearer` challenge and a JSON-RPC error body. A valid token
+without the required permission gets `403 insufficient_scope`. Claude Code can
+present the token directly:
+
+```sh
+claude mcp add --transport http imagine https://your-host/mcp \
+  --header "Authorization: Bearer $(az account get-access-token \
+    --resource https://your-host/mcp --query accessToken -o tsv)"
+```
+
+Registering the app in Entra — including the Application ID URI trap that makes
+the MCP URL itself a valid audience — is in
+[docs/deploy/azure-wizard.md](docs/deploy/azure-wizard.md); the reasoning is in
+[ADR 0017](docs/adr/0017-entra-bearer-token-validation.md).
 
 One caveat worth knowing before you share the URL with a colleague:
 `budget.max_usd_per_session` is enforced per process, so over HTTP it becomes a

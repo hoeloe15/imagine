@@ -12,6 +12,7 @@ import { parseModelKnowledge } from "../../src/core/knowledge.js";
 import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import { StubProvider } from "../../src/providers/stub.js";
 import { startHttpServer, type RunningHttpServer } from "../../src/transport/http.js";
+import type { AuthOutcome, CallerIdentity } from "../../src/transport/auth.js";
 
 const knowledge = parseModelKnowledge({
   schema_version: 1,
@@ -190,6 +191,112 @@ describe("the streamable HTTP transport", () => {
   });
 });
 
+describe("the same transport with authentication configured", () => {
+  const caller: CallerIdentity = {
+    callerId: "tenant:oid",
+    subject: "sub",
+    objectId: "oid",
+    tenantId: "tenant",
+    username: "mark@example.com",
+    clientId: null,
+    scopes: ["access_as_user"],
+    roles: [],
+    issuer: "https://login.microsoftonline.com/tenant/v2.0",
+    audience: "https://imagine.example/mcp",
+    expiresAt: 0,
+    claims: {},
+  };
+
+  const authenticate = (authorization: string | undefined): Promise<AuthOutcome> =>
+    Promise.resolve(
+      authorization === "Bearer good"
+        ? { ok: true, caller }
+        : {
+            ok: false,
+            status: 401,
+            error: authorization === undefined ? null : "invalid_token",
+            message: "Authentication required.",
+          },
+    );
+
+  async function guarded(seen?: (context: { caller: CallerIdentity | null }) => void) {
+    const deps = dependencies();
+    running = await startHttpServer({
+      host: "127.0.0.1",
+      port: 0,
+      authenticate,
+      challengeParams: { resource_metadata: "https://imagine.example/.well-known/x" },
+      createServer: (context) => {
+        seen?.(context);
+        return createServer(deps);
+      },
+    });
+    return running;
+  }
+
+  it("refuses a request with no token, and says how to authenticate", async () => {
+    const server = await guarded();
+
+    const response = await fetch(server.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe(
+      'Bearer resource_metadata="https://imagine.example/.well-known/x"',
+    );
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      error: { code: -32600 },
+    });
+  });
+
+  it("refuses a bad token with an invalid_token challenge", async () => {
+    const server = await guarded();
+
+    const response = await fetch(server.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: "Bearer stale",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toMatch(/error="invalid_token"/);
+  });
+
+  it("lets a valid token through with the caller attached", async () => {
+    const contexts: ({ caller: CallerIdentity | null } | undefined)[] = [];
+    const server = await guarded((context) => contexts.push(context));
+
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(server.endpoint), {
+        requestInit: { headers: { authorization: "Bearer good" } },
+      }),
+    );
+    const { tools } = await client.listTools();
+    await client.close();
+
+    expect(tools.map((tool) => tool.name)).toContain("generate_image");
+    expect(contexts[0]?.caller).toMatchObject({ callerId: "tenant:oid" });
+  });
+
+  it("leaves /healthz open", async () => {
+    const server = await guarded();
+
+    expect((await fetch(server.health)).status).toBe(200);
+  });
+});
+
 describe("the built binary with --http", () => {
   const binary = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
   let child: ChildProcess | undefined;
@@ -226,6 +333,42 @@ describe("the built binary with --http", () => {
     await client.close();
 
     expect(tools.map((tool) => tool.name)).toContain("generate_image");
+  });
+
+  it("guards the endpoint and says so when IMAGINE_AUTH_* is set", async () => {
+    const spawned = spawn(process.execPath, [binary, "--http"], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        HOME: directory,
+        USERPROFILE: directory,
+        IMAGINE_HTTP_PORT: "0",
+        IMAGINE_HTTP_HOST: "127.0.0.1",
+        IMAGINE_AUTH_TENANT_ID: "11111111-2222-3333-4444-555555555555",
+        IMAGINE_AUTH_AUDIENCE: "https://imagine.example/mcp",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child = spawned;
+
+    const banner = await readUntil(spawned, /endpoint:\s+(\S+)/);
+    expect(banner).toMatch(/AUTHENTICATED: every POST/);
+    expect(banner).not.toMatch(/THIS ENDPOINT IS UNAUTHENTICATED/);
+
+    const endpoint = /endpoint:\s+(\S+)/.exec(banner)?.[1] ?? "";
+    expect((await fetch(endpoint.replace(/\/mcp$/, "/healthz"))).status).toBe(200);
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe("Bearer");
   });
 });
 
