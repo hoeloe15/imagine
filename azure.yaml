@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: imagine
+metadata:
+  template: imagine@0.0.4
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  imagine:
+    project: .
+    language: js
+    host: containerapp
+    # The image is built from `Containerfile`, not `Dockerfile` (ADR 0018), so
+    # the path has to be named here or azd looks for a file that does not exist.
+    docker:
+      path: ./Containerfile
+
+hooks:
+  # Entra app registration (#44). Opt-in: it needs a tenant permission azd
+  # cannot grant itself, so it no-ops unless IMAGINE_ENTRA_HOOK=true, and it
+  # never fails the provision.
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/postprovision-entra.ps1
+      continueOnError: true
+      interactive: true
+    posix:
+      shell: pwsh
+      run: ./infra/hooks/postprovision-entra.ps1
+      continueOnError: true
+      interactive: true
+  predown:
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/predown-entra.ps1
+      continueOnError: true
+      interactive: true
+    posix:
+      shell: pwsh
+      run: ./infra/hooks/predown-entra.ps1
+      continueOnError: true
+      interactive: true

@@ -6,6 +6,9 @@ dist/
 .env
 .env.*
 
+# azd environments: subscription ids, tenant ids and every `azd env set` value
+.azure/
+
 # Generated output
 imagine-output/
 
