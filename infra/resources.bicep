@@ -32,7 +32,7 @@ var azureOpenAiSecretName = 'azure-openai-api-key'
 
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
-var keyVaultSecretsOfficerRoleId = 'b86a8fe4-44ce-4948-aba4-0b2d0ea19d21'
+var keyVaultSecretsOfficerRoleId = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
