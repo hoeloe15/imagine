@@ -5,6 +5,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { version } from "../version.js";
+import { undeclareJsonSchemaDialect } from "./json-schema-dialect.js";
 import {
   registerGenerateImage,
   type GenerateImageDependencies,
@@ -27,6 +28,8 @@ export function createServer(deps: ServerDependencies): McpServer {
     { name: "imagine", version },
     { capabilities: { tools: {} } },
   );
+
+  undeclareJsonSchemaDialect(server);
 
   registerGenerateImage(server, deps);
   registerListCapabilities(server, deps);
