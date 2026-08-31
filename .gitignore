@@ -19,3 +19,5 @@ Thumbs.db
 
 # blog
 /docs/blog/
+# bicep build artifact
+infra/main.json
