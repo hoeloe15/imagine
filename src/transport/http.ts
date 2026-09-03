@@ -19,6 +19,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Env } from "../core/config.js";
 import { version } from "../version.js";
 import { bearerChallenge, type Authenticator, type CallerIdentity } from "./auth.js";
+import type { ProtectedResource } from "./protected-resource.js";
 
 export const MCP_PATH = "/mcp";
 export const HEALTH_PATH = "/healthz";
@@ -53,8 +54,15 @@ export interface HttpTransportOptions extends Partial<HttpSettings> {
    */
   authenticate?: Authenticator;
   /**
-   * Extra `WWW-Authenticate` parameters on a 401. Issue #36 puts
-   * `resource_metadata` here so the hosted Claude surfaces can start OAuth.
+   * The RFC 9728 document to serve, and the URL the 401 points at. Present
+   * exactly when authentication is configured and a public URL for this server
+   * is known; without it the well-known paths are not routes at all.
+   */
+  protectedResource?: ProtectedResource;
+  /**
+   * Extra `WWW-Authenticate` parameters on a 401. Defaults to the
+   * `resource_metadata` and `scope` derived from {@link protectedResource};
+   * passing it explicitly replaces that.
    */
   challengeParams?: Readonly<Record<string, string>>;
 }
@@ -195,10 +203,16 @@ async function route(
       return;
     }
 
+    // Before the origin check and before authentication, deliberately: a
+    // client that cannot read this document has no way to learn how to
+    // authenticate, so guarding it would close the only door out of the 401.
+    if (options.protectedResource?.paths.includes(path)) {
+      handleProtectedResource(req, res, options.protectedResource);
+      return;
+    }
+
     if (path !== MCP_PATH) {
-      sendJson(res, 404, {
-        error: `Not found. This server serves ${MCP_PATH} and ${HEALTH_PATH}.`,
-      });
+      sendJson(res, 404, { error: notFoundMessage(options) });
       return;
     }
 
@@ -236,6 +250,26 @@ async function route(
   }
 }
 
+function notFoundMessage(options: HttpTransportOptions): string {
+  const paths = [MCP_PATH, HEALTH_PATH, ...(options.protectedResource?.paths ?? [])];
+  return `Not found. This server serves ${paths.join(", ")}.`;
+}
+
+function handleProtectedResource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  resource: ProtectedResource,
+): void {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("Allow", "GET, HEAD");
+    sendJson(res, 405, { error: "The metadata document is read with GET." });
+    return;
+  }
+
+  res.setHeader("cache-control", "no-store");
+  sendJson(res, 200, resource.document);
+}
+
 function handleHealth(req: IncomingMessage, res: ServerResponse): void {
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.setHeader("Allow", "GET, HEAD");
@@ -262,9 +296,32 @@ async function authenticated(
   const outcome = await options.authenticate(header(req, "authorization"));
   if (outcome.ok) return outcome.caller;
 
-  res.setHeader("WWW-Authenticate", bearerChallenge(outcome, options.challengeParams));
+  res.setHeader(
+    "WWW-Authenticate",
+    bearerChallenge(outcome, challengeParams(options, outcome.status)),
+  );
   sendRpcError(res, outcome.status, -32600, outcome.message);
   return REFUSED;
+}
+
+/**
+ * The pointer rides on the 401 and on nothing else. A 403 means the caller is
+ * authenticated and a fresh login would not help, and a 503 means this server
+ * could not reach the tenant's keys — sending either client off to start OAuth
+ * would be a lie that costs it a round trip and a consent screen.
+ */
+function challengeParams(
+  options: HttpTransportOptions,
+  status: number,
+): Readonly<Record<string, string>> | undefined {
+  if (status !== 401) return undefined;
+  if (options.challengeParams) return options.challengeParams;
+  if (!options.protectedResource) return undefined;
+
+  return {
+    resource_metadata: options.protectedResource.metadataUrl,
+    scope: options.protectedResource.document.scopes_supported.join(" "),
+  };
 }
 
 async function handleMcpPost(

@@ -9,9 +9,14 @@ import {
 import {
   httpRequested,
   httpSettingsFromEnv,
+  MCP_PATH,
   startHttpServer,
   type RunningHttpServer,
 } from "./transport/http.js";
+import {
+  protectedResourceFromEnv,
+  type ProtectedResource,
+} from "./transport/protected-resource.js";
 import { version } from "./version.js";
 
 if (httpRequested(process.argv.slice(2), process.env)) {
@@ -24,15 +29,17 @@ if (httpRequested(process.argv.slice(2), process.env)) {
 async function serveHttp(): Promise<void> {
   const settings = httpSettingsFromEnv(process.env);
   const auth = authSettingsFromEnv(process.env);
+  const resource = protectedResourceFromEnv(process.env, auth, { mcpPath: MCP_PATH });
   const dependencies = await buildDependencies();
 
   const running = await startHttpServer({
     ...settings,
     ...(auth ? { authenticate: createAuthenticator(auth) } : {}),
+    ...(resource ? { protectedResource: resource } : {}),
     createServer: () => createServer(dependencies),
   });
 
-  process.stderr.write(banner(running, settings.allowedOrigins, auth));
+  process.stderr.write(banner(running, settings.allowedOrigins, auth, resource));
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
@@ -45,6 +52,7 @@ function banner(
   running: RunningHttpServer,
   allowedOrigins: readonly string[],
   auth: AuthSettings | null,
+  resource: ProtectedResource | null,
 ): string {
   const origins =
     allowedOrigins.length === 0
@@ -64,7 +72,9 @@ function banner(
     `  health:          ${running.health}`,
     `  allowed origins: ${origins}`,
     "",
-    ...(auth === null ? unauthenticatedNotice() : authenticatedNotice(auth)),
+    ...(auth === null
+      ? unauthenticatedNotice()
+      : [...authenticatedNotice(auth), ...discoveryNotice(resource)]),
     exposure,
     "",
   ].join("\n");
@@ -88,5 +98,22 @@ function authenticatedNotice(auth: AuthSettings): string[] {
     `  audience:        ${auth.audiences.join(", ")}`,
     `  required scope:  ${auth.requiredScopes.join(" or ")}`,
     "  /healthz stays open, so probes and load balancers keep working.",
+  ];
+}
+
+function discoveryNotice(resource: ProtectedResource | null): string[] {
+  if (resource === null) {
+    return [
+      "",
+      "  !! No protected-resource metadata is being served, because this server",
+      "  !! does not know its own public URL. Claude cannot start OAuth without",
+      "  !! it. Set IMAGINE_PUBLIC_URL to the public origin, or",
+      "  !! IMAGINE_MCP_RESOURCE_URI to the endpoint URL itself.",
+    ];
+  }
+
+  return [
+    `  resource:        ${resource.resource}`,
+    `  metadata:        ${resource.metadataUrl}  (open, GET)`,
   ];
 }

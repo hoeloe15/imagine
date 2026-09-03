@@ -12,7 +12,15 @@ import { parseModelKnowledge } from "../../src/core/knowledge.js";
 import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import { StubProvider } from "../../src/providers/stub.js";
 import { startHttpServer, type RunningHttpServer } from "../../src/transport/http.js";
-import type { AuthOutcome, CallerIdentity } from "../../src/transport/auth.js";
+import type {
+  AuthOutcome,
+  AuthSettings,
+  CallerIdentity,
+} from "../../src/transport/auth.js";
+import {
+  PROTECTED_RESOURCE_PATH,
+  protectedResourceFor,
+} from "../../src/transport/protected-resource.js";
 
 const knowledge = parseModelKnowledge({
   schema_version: 1,
@@ -189,6 +197,14 @@ describe("the streamable HTTP transport", () => {
 
     expect((await fetch(`http://127.0.0.1:${server.port}/`)).status).toBe(404);
   });
+
+  it("has no well-known route at all with authentication off", async () => {
+    const server = await serve();
+    const base = `http://127.0.0.1:${server.port}`;
+
+    expect((await fetch(`${base}${PROTECTED_RESOURCE_PATH}`)).status).toBe(404);
+    expect((await fetch(`${base}${PROTECTED_RESOURCE_PATH}/mcp`)).status).toBe(404);
+  });
 });
 
 describe("the same transport with authentication configured", () => {
@@ -207,17 +223,33 @@ describe("the same transport with authentication configured", () => {
     claims: {},
   };
 
-  const authenticate = (authorization: string | undefined): Promise<AuthOutcome> =>
-    Promise.resolve(
-      authorization === "Bearer good"
-        ? { ok: true, caller }
-        : {
-            ok: false,
-            status: 401,
-            error: authorization === undefined ? null : "invalid_token",
-            message: "Authentication required.",
-          },
-    );
+  const auth: AuthSettings = {
+    tenantId: "tenant",
+    issuer: "https://login.microsoftonline.com/tenant/v2.0",
+    audiences: ["https://imagine.example/mcp"],
+    requiredScopes: ["access_as_user"],
+    metadataUrl:
+      "https://login.microsoftonline.com/tenant/v2.0/.well-known/openid-configuration",
+  };
+  const resource = protectedResourceFor("https://imagine.example/mcp", auth);
+
+  const authenticate = (authorization: string | undefined): Promise<AuthOutcome> => {
+    if (authorization === "Bearer good") return Promise.resolve({ ok: true, caller });
+    if (authorization === "Bearer readonly") {
+      return Promise.resolve({
+        ok: false,
+        status: 403,
+        error: "insufficient_scope",
+        message: "The token carries none of the required permissions.",
+      });
+    }
+    return Promise.resolve({
+      ok: false,
+      status: 401,
+      error: authorization === undefined ? null : "invalid_token",
+      message: "Authentication required.",
+    });
+  };
 
   async function guarded(seen?: (context: { caller: CallerIdentity | null }) => void) {
     const deps = dependencies();
@@ -225,7 +257,7 @@ describe("the same transport with authentication configured", () => {
       host: "127.0.0.1",
       port: 0,
       authenticate,
-      challengeParams: { resource_metadata: "https://imagine.example/.well-known/x" },
+      protectedResource: resource,
       createServer: (context) => {
         seen?.(context);
         return createServer(deps);
@@ -234,21 +266,26 @@ describe("the same transport with authentication configured", () => {
     return running;
   }
 
-  it("refuses a request with no token, and says how to authenticate", async () => {
-    const server = await guarded();
-
-    const response = await fetch(server.endpoint, {
+  function post(endpoint: string, authorization?: string): Promise<Response> {
+    return fetch(endpoint, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
+        ...(authorization === undefined ? {} : { authorization }),
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
     });
+  }
+
+  it("refuses a request with no token, and points at the metadata document", async () => {
+    const server = await guarded();
+
+    const response = await post(server.endpoint);
 
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toBe(
-      'Bearer resource_metadata="https://imagine.example/.well-known/x"',
+      'Bearer resource_metadata="https://imagine.example/.well-known/oauth-protected-resource/mcp", scope="access_as_user"',
     );
     expect(await response.json()).toMatchObject({
       jsonrpc: "2.0",
@@ -256,21 +293,74 @@ describe("the same transport with authentication configured", () => {
     });
   });
 
-  it("refuses a bad token with an invalid_token challenge", async () => {
+  it("refuses a bad token with an invalid_token challenge that still points", async () => {
     const server = await guarded();
 
-    const response = await fetch(server.endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        authorization: "Bearer stale",
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
-    });
+    const response = await post(server.endpoint, "Bearer stale");
 
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toMatch(/error="invalid_token"/);
+    expect(response.headers.get("www-authenticate")).toMatch(
+      /resource_metadata="https:\/\/imagine\.example\/\.well-known\/oauth-protected-resource\/mcp"/,
+    );
+  });
+
+  it("answers a valid token without the permission with 403 and no pointer", async () => {
+    const server = await guarded();
+
+    const response = await post(server.endpoint, "Bearer readonly");
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("www-authenticate")).toMatch(
+      /error="insufficient_scope"/,
+    );
+    expect(response.headers.get("www-authenticate")).not.toMatch(/resource_metadata/);
+  });
+
+  it("serves the metadata document, unauthenticated, on both well-known paths", async () => {
+    const server = await guarded();
+    const base = `http://127.0.0.1:${server.port}`;
+
+    for (const path of [`${PROTECTED_RESOURCE_PATH}/mcp`, PROTECTED_RESOURCE_PATH]) {
+      const response = await fetch(`${base}${path}`);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toMatch(/application\/json/);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        resource: "https://imagine.example/mcp",
+        authorization_servers: ["https://login.microsoftonline.com/tenant/v2.0"],
+        scopes_supported: ["access_as_user"],
+        bearer_methods_supported: ["header"],
+        resource_name: "imagine",
+      });
+    }
+  });
+
+  it("publishes a resource that is exactly what the 401 pointed at", async () => {
+    const server = await guarded();
+
+    const challenge =
+      (await post(server.endpoint)).headers.get("www-authenticate") ?? "";
+    const pointer = /resource_metadata="([^"]+)"/.exec(challenge)?.[1] ?? "";
+
+    const document = (await (
+      await fetch(`http://127.0.0.1:${server.port}${new URL(pointer).pathname}`)
+    ).json()) as { resource: string };
+
+    expect(document.resource).toBe("https://imagine.example/mcp");
+  });
+
+  it("answers a POST to the metadata path with 405", async () => {
+    const server = await guarded();
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.port}${PROTECTED_RESOURCE_PATH}/mcp`,
+      { method: "POST" },
+    );
+
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET, HEAD");
   });
 
   it("lets a valid token through with the caller attached", async () => {
@@ -346,6 +436,7 @@ describe("the built binary with --http", () => {
         IMAGINE_HTTP_HOST: "127.0.0.1",
         IMAGINE_AUTH_TENANT_ID: "11111111-2222-3333-4444-555555555555",
         IMAGINE_AUTH_AUDIENCE: "https://imagine.example/mcp",
+        IMAGINE_PUBLIC_URL: "https://imagine.example",
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -354,9 +445,20 @@ describe("the built binary with --http", () => {
     const banner = await readUntil(spawned, /endpoint:\s+(\S+)/);
     expect(banner).toMatch(/AUTHENTICATED: every POST/);
     expect(banner).not.toMatch(/THIS ENDPOINT IS UNAUTHENTICATED/);
+    expect(banner).toMatch(
+      /metadata:\s+https:\/\/imagine\.example\/\.well-known\/oauth-protected-resource\/mcp/,
+    );
 
     const endpoint = /endpoint:\s+(\S+)/.exec(banner)?.[1] ?? "";
     expect((await fetch(endpoint.replace(/\/mcp$/, "/healthz"))).status).toBe(200);
+
+    const metadata = await fetch(
+      endpoint.replace(/\/mcp$/, `${PROTECTED_RESOURCE_PATH}/mcp`),
+    );
+    expect(metadata.status).toBe(200);
+    expect(await metadata.json()).toMatchObject({
+      resource: "https://imagine.example/mcp",
+    });
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -368,7 +470,9 @@ describe("the built binary with --http", () => {
     });
 
     expect(response.status).toBe(401);
-    expect(response.headers.get("www-authenticate")).toBe("Bearer");
+    expect(response.headers.get("www-authenticate")).toBe(
+      'Bearer resource_metadata="https://imagine.example/.well-known/oauth-protected-resource/mcp", scope="access_as_user"',
+    );
   });
 });
 

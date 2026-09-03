@@ -426,16 +426,30 @@ describe("the signing keys", () => {
 });
 
 describe("bearerChallenge", () => {
-  it("carries the parameters issue #36 will add", async () => {
+  it("carries the discovery pointer and the scope, and nothing else, on a missing token", async () => {
     const outcome = refused(await authenticator()(undefined));
 
     expect(
       bearerChallenge(outcome, {
         resource_metadata:
-          "https://imagine.example.com/.well-known/oauth-protected-resource",
+          "https://imagine.example.com/.well-known/oauth-protected-resource/mcp",
+        scope: "access_as_user",
       }),
     ).toBe(
-      'Bearer resource_metadata="https://imagine.example.com/.well-known/oauth-protected-resource"',
+      'Bearer resource_metadata="https://imagine.example.com/.well-known/oauth-protected-resource/mcp", scope="access_as_user"',
+    );
+  });
+
+  it("keeps the pointer after the error on a token that was refused", async () => {
+    const outcome = refused(await authenticator()("Bearer not-a-jwt"));
+
+    expect(
+      bearerChallenge(outcome, {
+        resource_metadata:
+          "https://imagine.example.com/.well-known/oauth-protected-resource/mcp",
+      }),
+    ).toMatch(
+      /^Bearer error="invalid_token", error_description=".+", resource_metadata="https:\/\/imagine\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"$/,
     );
   });
 
