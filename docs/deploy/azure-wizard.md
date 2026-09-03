@@ -1,15 +1,24 @@
 # Deploying imagine to Azure — operator runbook
 
-Windows, PowerShell 7. This is a runbook to execute later, step by step, by a
-human at a keyboard. It covers only the parts a human must do: the sign-ins, the
+Windows, PowerShell 7. This is a runbook to execute step by step, by a human at
+a keyboard. It covers only the parts a human must do: the sign-ins, the
 subscription choice, the one secret, and the client connection. Everything else
 is `azd`'s job.
 
-The container image (#39), the `azd` template (#40), Key Vault credentials (#41)
-and the Entra registration hook (#44) are in the repo. Nothing here has been run
-against a live subscription yet, so follow it and correct it where reality
-disagrees — a runbook that was never executed is a wish list. Steps that still
-depend on unmerged work say so by issue number rather than pretending.
+**Executed against a live subscription on 2026-09-03**, in a personal
+(hotmail-rooted) tenant, from `azd up` through the Entra hook, token validation
+and a real authenticated `tools/list`. The timings and error messages below are
+measured, not estimated. What that run did **not** exercise: a provider key in
+the vault and the two-pass `*_SECRET_IN_VAULT` flow (§6), managed-identity Azure
+OpenAI end to end (§6b), the claude.ai / Cowork custom-connector login from the
+client side (§8), and `azd down --purge` with the `predown` hook (§9). Those
+sections are still written from the template rather than from experience — the
+list at the bottom says exactly which questions are open.
+
+For the short version — the three switches and nothing else — see
+**Deploying to Azure** in the [README](../../README.md). This is the long
+version: tenant permissions, the manual app registration, every verification
+step, teardown.
 
 Background and the reasoning behind the choices here:
 [`docs/research/remote-mcp-2026-08.md`](../research/remote-mcp-2026-08.md).
@@ -50,13 +59,14 @@ winget install --exact --id Docker.DockerDesktop
 ```
 
 Docker Desktop must actually be **running** — `azd` builds the image locally and
-pushes it to the registry. A stopped Docker daemon produces an `azd up` failure
-several minutes in.
+pushes it to the registry. A stopped Docker daemon lets the provision succeed
+and then fails the deploy — the infrastructure exists, the app does not.
 
 The image is built from [`Containerfile`](../../Containerfile), not a
 `Dockerfile`, which is why `azure.yaml` names it explicitly
 (`docker: { path: ./Containerfile }`). Prove the build before you provision
-anything — it is a minute here versus ten minutes into `azd up`:
+anything — it is a minute here versus a failed `azd up` after the
+infrastructure already exists:
 
 ```powershell
 docker build -f Containerfile -t imagine:local .
@@ -204,8 +214,10 @@ azd up
 ```
 
 This provisions the infrastructure, builds the container image, pushes it to the
-registry and deploys the container app. Expect the first run to take on the order
-of ten minutes. It prints the endpoint FQDN at the end; keep it.
+registry and deploys the container app. **Measured on 2026-09-03: about two
+minutes end to end** — 1m20 to 1m45 for the provision, 25 to 30 seconds for the
+deploy. Later runs that flip a flag take about the same. It prints the endpoint
+FQDN at the end; keep it.
 
 What you have after this run is deliberately not the finished thing: a reachable,
 **unauthenticated** endpoint running with **no provider key**. That is issue
@@ -237,14 +249,37 @@ string that must be an Application ID URI), `AZURE_RESOURCE_GROUP`,
 **If the first run fails on a role assignment with a 403**, that is Entra
 propagation delay, not a broken template — a role assignment made in the same
 deployment as the identity it grants can land before the identity is visible.
-Re-run `azd up`. See #43.
+Re-run `azd up`. See #43. (On the live run of 2026-09-03 this did not happen:
+all role assignments landed on the first attempt.)
+
+**If provisioning fails with `RoleDefinitionDoesNotExist`**, your checkout
+predates commit `911edea` — the template carried an invented GUID for Key Vault
+Secrets Officer. Pull, and re-run.
 
 **The app registration step cannot fail this run**: it is off by default and is
 section 6c's business, not `azd up`'s.
 
+### What the terminal tells you after `azd up`
+
+A `postdeploy` hook (`infra/hooks/postdeploy-next-steps.ps1`) prints a **Next
+steps** block once the deploy finishes. It reads the `azd` environment back
+rather than assuming anything, and names the gaps that are actually still open
+in *your* environment: whether authentication is on, whether a provider
+credential has reached the container, and the exact commands to close each one.
+It prints only — it never provisions, never writes to the environment and never
+fails the deploy.
+
+Read it before you read the rest of this document: it tells you which of the
+following sections you still need. If it warns that authentication is off, §6c
+and §6d are next, and §6 waits until after them.
+
 ---
 
 ## 6. Set the OpenRouter key
+
+> **Not yet executed live.** Everything from here to the end of this section is
+> written from the template, not from a run. The 2026-09-03 run left the vault
+> empty. Turn authentication on (§6c, §6d) *before* you put a key in it.
 
 The template deliberately does not contain the key. It provisions the vault and
 grants the container's managed identity read access; you put the value in, once,
@@ -321,14 +356,19 @@ az containerapp revision restart --name $app --resource-group $rg `
 **Rotation later is this same pair of commands and nothing else** — `az keyvault
 secret set` and a revision restart. No `azd`, no redeploy, no template change:
 the reference points at the secret's unversioned URI, so a new version is picked
-up on the next container start. Verify that on the first run and correct this
-paragraph if it turns out to be wrong.
+up on the next container start. That is the template's design and is still
+unverified against a live vault — correct this paragraph the first time you do
+it.
 
 ---
 
 ## 6b. Point the hosted server at Azure OpenAI
 
 Skip this if you only use OpenRouter.
+
+> **Not yet executed live.** No part of this section was exercised on
+> 2026-09-03 — no Foundry account, no `IMAGINE_CONFIG_JSON`, no managed-identity
+> token against the Azure OpenAI data plane. Treat it as the template's intent.
 
 The container has no `~/.imagine/config.json` and nowhere to write one, so the
 whole config fragment travels in one environment variable,
@@ -423,10 +463,21 @@ azd deploy
 `infra/hooks/postprovision-entra.ps1` then creates or reuses a single-tenant
 registration named `imagine-mcp-<env-name>`, sets both `api://<client-id>` and
 the `/mcp` URL as Application ID URIs, declares `access_as_user` as a delegated
-scope, pre-authorizes VS Code
-(`aebc6443-996d-45c2-90f0-388ff96faa56`), creates the service principal, and
-writes `AZURE_MCP_APP_ID` and `IMAGINE_AUTH_CLIENT_ID` back into the `azd`
+scope, pre-authorizes the Azure CLI (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) and
+VS Code (`aebc6443-996d-45c2-90f0-388ff96faa56`), creates the service principal,
+and writes `AZURE_MCP_APP_ID` and `IMAGINE_AUTH_CLIENT_ID` back into the `azd`
 environment.
+
+**This route was executed on 2026-09-03** in a personal, hotmail-rooted tenant,
+and the big open assumption held: Entra accepted `https://<fqdn>/mcp` on an
+unverified `azurecontainerapps.io` domain as an Application ID URI, because the
+registration is single-tenant. Two things had to be fixed to get there and are
+fixed in the repo: the scope declaration and the client pre-authorisation were
+sent as one Graph `PATCH`, which Entra silently rejected while the hook reported
+success — they are now two calls with an exit-code check on each; and the Azure
+CLI was not pre-authorised, so `az account get-access-token --scope
+"api://<client-id>/access_as_user"` demanded consent. Both now work without a
+prompt.
 
 It never fails the provision. If it prints a warning about permissions, take
 route B — nothing is half-created, because it stops before writing.
@@ -456,12 +507,16 @@ consolation prize.
    `azd env get-value MCP_RESOURCE_URI` exactly: `https`, the FQDN, `/mcp`, and
    **no trailing slash**. If the portal refuses the https URI, check the
    registration really is single-tenant — Entra requires a verified domain for
-   multi-tenant apps, not for single-tenant ones.
+   multi-tenant apps, not for single-tenant ones. (Confirmed live on
+   2026-09-03: an unverified `azurecontainerapps.io` URL is accepted.)
 3. **Expose an API → Add a scope.** Name it `access_as_user`, consentable by
    **Admins and users**, and fill the four display strings. This is the value
    `IMAGINE_AUTH_REQUIRED_SCOPE` expects.
-4. **Add a client application**, if VS Code or Copilot is a target:
-   `aebc6443-996d-45c2-90f0-388ff96faa56`, ticking `access_as_user`.
+4. **Add a client application.** The **Azure CLI**,
+   `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, is not optional if you want
+   `az account get-access-token` to work without a consent prompt — §7c depends
+   on it. Add VS Code / Copilot too if that is a target:
+   `aebc6443-996d-45c2-90f0-388ff96faa56`. Tick `access_as_user` on both.
 5. Grant admin consent if the tenant requires it.
 6. Hand the ids to `azd`:
 
@@ -491,14 +546,23 @@ azd env set IMAGINE_AUTH_ENABLED true
 azd up
 ```
 
-The template sets all four variables for you. `IMAGINE_AUTH_AUDIENCE` gets **two
-audiences**, because two clients ask for two different resources: Claude sends
-the **full MCP URL including `/mcp`** as the RFC 8707 `resource`, while
-`az account get-access-token --resource "api://<app-id>"` gets you the default
-one. The first is computed by the template from the container app's FQDN and is
-always present; the second comes from `IMAGINE_AUTH_CLIENT_ID`. Both must be
-Application ID URIs on the app registration or the token request fails with
-`AADSTS9010010`. This is the single most likely thing to break the demo.
+The template sets all four variables for you. `IMAGINE_AUTH_AUDIENCE` gets
+**three audiences**, because callers do not agree on what the resource is
+called:
+
+- `https://<fqdn>/mcp` — Claude sends the full MCP URL, path included, as the
+  RFC 8707 `resource`. Computed by the template from the container app's FQDN
+  and always present.
+- `api://<client-id>` — what `az account get-access-token --resource
+  "api://<app-id>"` asks for. Comes from `IMAGINE_AUTH_CLIENT_ID`.
+- the **bare client id**, no scheme — because an Entra **v2** access token
+  carries the bare id in `aud` whatever identifier URI the scope was requested
+  through. Found the hard way on 2026-09-03; see §7c.
+
+The first two must also exist as Application ID URIs on the app registration, or
+the token request itself fails with `AADSTS9010010`. This is the single most
+likely thing to break the demo. If you ever set `IMAGINE_AUTH_AUDIENCE` by hand,
+it must contain all three.
 
 Do not set these with `az containerapp update`. The next `azd provision` would
 drop them again — the template owns the container app's environment.
@@ -526,7 +590,9 @@ work out its own public URL — §7b says what to look at.
 ## 7. Verify the deployed endpoint
 
 Three checks, in order. Do not skip to the client until all three pass — the
-client-side error messages are far worse than the HTTP ones.
+client-side error messages are far worse than the HTTP ones. All three were run
+with `curl.exe` against the public endpoint on 2026-09-03 and pass; the
+responses quoted below are what came back, not what was expected.
 
 **7a. It is alive.**
 
@@ -596,16 +662,18 @@ curl.exe -s -X POST "$fqdn/mcp" `
   -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_capabilities\",\"arguments\":{}}}'
 ```
 
-Look for `openrouter` with status `ready`. If it says `not_configured` and names
-`OPENROUTER_API_KEY`, the secret did not reach the container — go back to step 6
-and restart the revision.
+On 2026-09-03 this returned `200` and a `tools/list` showed all three tools, so
+the token path is proven end to end. Look for `openrouter` with status `ready`.
+If it says `not_configured` and names `OPENROUTER_API_KEY`, the secret did not
+reach the container — go back to step 6 and restart the revision. (On that run
+it correctly said `not_configured`: no key had been set.)
 
 If instead you get `AADSTS9010010` when acquiring the token, the endpoint URL is
 not registered as an Application ID URI on the app registration. Add it under
 **Expose an API → Application ID URI**, exactly, including the `/mcp` path and
 with no trailing slash. See §6c.
 
-Two more failures seen on the first real run, both fixed in the template but
+Two more failures seen on the live run of 2026-09-03, both fixed in the repo but
 worth recognising:
 
 - `AADSTS65001` / `consent_required` when acquiring the token with the Azure
@@ -621,7 +689,8 @@ worth recognising:
 
 **7d. It refuses what it should refuse.** The rejection paths are unit-tested
 with locally minted keys, but only a live tenant proves the deployed
-configuration. Three tokens, all of which must fail:
+configuration. Three tokens, all of which must fail. The third — no token at all
+— is the one 7b already exercised live; run the other two as well:
 
 ```powershell
 # A token for a resource this server does not accept: expect 401, invalid_token.
@@ -704,15 +773,19 @@ Two things that will otherwise waste an afternoon:
   endpoint that leaves Claude Code working will silently break the hosted
   surfaces, and the error you get says "Couldn't reach the MCP server".
 
-The discovery half of this is done: the endpoint challenges with a
-`resource_metadata` pointer and serves the document it points at (§7b, ADR
-0021), which is what lets the connector dialog get as far as asking Entra for a
-token. What is still open is the **client registration** above — pasting a
-pre-registered Client ID — which is #48.
+The **server** half of this is verified live (2026-09-03): the endpoint
+challenges with a `resource_metadata` pointer and serves the document it points
+at (§7b, ADR 0021), which is what lets the connector dialog get as far as asking
+Entra for a token. The **client** half is not: nobody has yet completed a
+claude.ai or Cowork connector login against this deployment. That, plus the
+**client registration** above — pasting a pre-registered Client ID — is #48.
 
 ---
 
 ## 9. Tear it down
+
+> **Not yet executed live.** The 2026-09-03 run was left standing. Whether
+> `predown` fires before the resources go is still an open question.
 
 ```powershell
 azd down --purge
@@ -738,44 +811,70 @@ az ad app delete --id <app-id>
 
 ---
 
-## Open items to correct on first real run
+## Verified on the first run
 
-Fill these in the first time this is executed against a live subscription; each
-one is a guess until then.
+Executed 2026-09-03 against a live subscription in a personal, hotmail-rooted
+tenant.
 
-Nothing below this line has been executed against a live subscription. The
-template's Bicep compiles and the hooks parse; that catches syntax and type
-errors and nothing else.
+- [x] `azd up` accepts the boolean parameters as `"${VAR=false}"` strings in
+      `main.parameters.json`. No change to string parameters needed.
+- [x] **Entra accepts `https://<fqdn>/mcp` as an Application ID URI** on an
+      unverified `azurecontainerapps.io` domain, for a single-tenant
+      registration (§6c). This was the assumption the whole auth story rested
+      on; it holds.
+- [x] The Entra hook works from a personal tenant, creating a single-tenant
+      registration. Its first version silently failed the Graph `PATCH` because
+      it sent the scope declaration and the client pre-authorisation in one
+      request; now split, with an exit-code check on each. It also
+      pre-authorises the Azure CLI, so
+      `az account get-access-token --scope "api://<client-id>/access_as_user"`
+      succeeds without a consent prompt.
+- [x] Entra **v2** access tokens carry the **bare client id** as `aud`. The
+      template now lists it as an accepted audience alongside the URL and
+      `api://` forms (§6d, §7c).
+- [x] The role assignments propagate in time — the first `azd up` needed no
+      re-run for #43. It did fail once on `RoleDefinitionDoesNotExist`, because
+      the template carried an invented GUID for Key Vault Secrets Officer;
+      fixed in `911edea` (the real one is
+      `b86a8fe4-44ce-4948-aee5-eccb2c155cd7`).
+- [x] With auth on, verified with `curl.exe` against the public endpoint:
+      `GET /.well-known/oauth-protected-resource/mcp` returns the RFC 9728
+      document; `POST /mcp` without a token returns `401` with
+      `WWW-Authenticate: Bearer resource_metadata=…, scope="access_as_user"`;
+      with a real token, `200`, and `tools/list` shows all three tools.
+- [x] **Wall-clock `azd up`: about two minutes** — provision 1m20 to 1m45,
+      deploy 25 to 30 seconds. Incremental re-runs are comparable.
+- [x] Admin consent was **not** required in this tenant.
+- [x] A bare `azd provision` after a deploy does revert the app to the GHCR
+      `edge` image, as §5 warns. `azd up` is the habit; the postdeploy hook's
+      advice says so too.
 
-- [ ] Whether `azd` accepts the boolean parameters as `"${VAR=false}"` strings in
-      `main.parameters.json`, or whether they have to become string parameters.
-- [ ] Whether the Key Vault reference really is picked up by a plain revision
-      restart after `az keyvault secret set`, with no redeploy (§6).
-- [ ] Whether Entra accepts `https://<fqdn>/mcp` as an Application ID URI on an
-      unverified `azurecontainerapps.io` domain for a single-tenant app (§6c).
-      This is the assumption the whole auth story rests on.
-- [ ] Whether the Graph PATCH in the postprovision hook is accepted as written,
-      including `requestedAccessTokenVersion: 2`.
-- [ ] Whether the AcrPull / Key Vault Secrets User role assignments propagate
-      before the container app is created, or whether the first `azd up` needs
-      a re-run (#43).
-- [ ] Whether a hosted Claude surface actually completes discovery against the
-      `/.well-known/*` route the container now serves (#36, ADR 0021). The route
-      and the challenge are covered by tests over a real HTTP server; what no
-      test can prove is Claude's own behaviour against a live tenant.
-- [ ] Whether `azd env set IMAGINE_CONFIG_JSON '<json>'` survives the round trip
-      through the azd env file and `main.parameters.json` substitution without
-      the quotes being mangled (§6b).
+## Still open
+
+Not exercised on 2026-09-03, and still a guess until someone runs it.
+
+- [ ] The whole of §6: a provider key in the vault, the two-pass
+      `IMAGINE_*_SECRET_IN_VAULT` flow, and whether the Key Vault reference is
+      really picked up by a plain revision restart after
+      `az keyvault secret set`, with no redeploy.
+- [ ] The whole of §6b: managed-identity Azure OpenAI end to end. Including
+      whether `azd env set IMAGINE_CONFIG_JSON '<json>'` survives the round trip
+      through the azd env file and `main.parameters.json` substitution with its
+      quotes intact.
+- [ ] Whether `resource=https://ai.azure.com` is the resource the Foundry data
+      plane actually accepts, as opposed to
+      `https://cognitiveservices.azure.com` (the `AZURE_ENTRA_SCOPE` question).
 - [ ] Whether the Container Apps identity endpoint answers on api-version
       `2019-08-01` with `expires_on` as epoch seconds, and whether
       `AZURE_CLIENT_ID` is required or merely accepted with one user-assigned
       identity (ADR 0022).
-- [ ] Whether `resource=https://ai.azure.com` is the resource the Foundry
-      data plane actually accepts, as opposed to
-      `https://cognitiveservices.azure.com`.
 - [ ] How long the Cognitive Services OpenAI User assignment takes to propagate
       before the first `generate_image` stops returning 403 (§6b).
-- [ ] Whether `predown` actually runs on `azd down` before the resources go.
-- [ ] Actual `azd up` wall-clock time and actual monthly cost.
-- [ ] Whether admin consent was required in this tenant, and who granted it.
+- [ ] Whether a hosted Claude surface — claude.ai or Cowork — actually completes
+      the custom-connector login against this endpoint (#36, #48, ADR 0021).
+      The server side is verified (§7b); Claude's own client-side behaviour
+      against a live tenant is not.
+- [ ] Whether `predown` actually runs on `azd down --purge` before the resources
+      go, and deletes the registration it created (§9).
+- [ ] Actual monthly cost.
 
