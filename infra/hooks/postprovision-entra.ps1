@@ -16,6 +16,10 @@
 $ErrorActionPreference = 'Stop'
 
 $VSCodeClientId = 'aebc6443-996d-45c2-90f0-388ff96faa56'
+# Pre-authorising the Azure CLI lets the operator test the endpoint with
+# `az account get-access-token --scope api://<client-id>/access_as_user`
+# without a consent prompt. Claude and other OAuth clients still consent.
+$AzureCliClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
 
 function Get-AzdValue([string]$Name) {
     $fromEnv = [Environment]::GetEnvironmentVariable($Name)
@@ -126,11 +130,15 @@ $scopePatched = Invoke-GraphPatch -What 'Identifier URIs and access_as_user scop
 }
 if ($scopePatched) {
     Write-Host "Application ID URIs now: $($identifierUris -join ', ')"
-    Invoke-GraphPatch -What 'Pre-authorising VS Code' -Body @{
+    Invoke-GraphPatch -What 'Pre-authorising VS Code and the Azure CLI' -Body @{
         api = @{
             preAuthorizedApplications = @(
                 @{
                     appId                  = $VSCodeClientId
+                    delegatedPermissionIds = @($scopeId)
+                }
+                @{
+                    appId                  = $AzureCliClientId
                     delegatedPermissionIds = @($scopeId)
                 }
             )
