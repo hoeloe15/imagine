@@ -40,6 +40,12 @@
     },
     "authIssuer": {
       "value": "${IMAGINE_AUTH_ISSUER=}"
+    },
+    "imagineConfigJson": {
+      "value": "${IMAGINE_CONFIG_JSON=}"
+    },
+    "foundryResourceId": {
+      "value": "${IMAGINE_FOUNDRY_RESOURCE_ID=}"
     }
   }
 }

@@ -32,8 +32,9 @@ export type FetchLike = typeof globalThis.fetch;
 export type AzureAuthMode = "api_key" | "entra";
 
 /**
- * Supplies an Entra bearer token. Injected rather than acquired here: taking a
- * credential library as a dependency is a decision of its own (ADR 0014).
+ * Supplies an Entra bearer token. Injected rather than acquired here (ADR 0014);
+ * `managed-identity.ts` is the implementation the composition root wires when
+ * the platform provides an identity (ADR 0022).
  */
 export type AccessTokenProvider = () => Promise<string>;
 

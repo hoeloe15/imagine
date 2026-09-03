@@ -14,7 +14,19 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { openCostLedger, type CostLedger } from "./core/budget.js";
 import { loadConfig, resolveApiKey, type LoadConfigOptions } from "./core/config.js";
 import { loadBundledModelKnowledge } from "./core/knowledge.js";
-import { AZURE_ID, AzureProvider, AZURE_ENTRA_SCOPE } from "./providers/azure.js";
+import {
+  AZURE_ID,
+  AzureProvider,
+  AZURE_ENTRA_SCOPE,
+  type AccessTokenProvider,
+} from "./providers/azure.js";
+import {
+  IDENTITY_ENDPOINT_ENV,
+  IDENTITY_HEADER_ENV,
+  createManagedIdentityTokenProvider,
+  hasManagedIdentity,
+} from "./providers/managed-identity.js";
+import type { Env } from "./core/config.js";
 import { ImagineError } from "./core/errors.js";
 import { OPENROUTER_ID, OpenRouterProvider } from "./providers/openrouter.js";
 import type { ImageProvider } from "./providers/types.js";
@@ -66,22 +78,27 @@ function azureProvider(loaded: ReturnType<typeof loadConfig>): AzureProvider {
     ...(provider?.deployments === undefined
       ? {}
       : { deployments: provider.deployments }),
-    ...(auth === "entra" ? { getAccessToken: entraNotImplemented } : {}),
+    ...(auth === "entra" ? { getAccessToken: entraTokenProvider(loaded.env) } : {}),
   });
 }
 
 /**
- * Entra is the documented Azure recommendation, but acquiring a token needs a
- * credential library — a dependency decision that belongs to the endpoint-auth
- * work in issue #23. Until then the adapter is wired with a token provider that
- * says so, rather than reporting itself unconfigured for a reason the config
- * cannot show. See ADR 0014.
+ * Hosted, the platform's managed identity mints the token. Locally there is no
+ * identity to mint one with, and the adapter is wired with a provider that says
+ * exactly that rather than reporting itself unconfigured for a reason the config
+ * cannot show. See ADR 0014 and ADR 0022.
  */
-function entraNotImplemented(): Promise<string> {
+function entraTokenProvider(env: Env): AccessTokenProvider {
+  return hasManagedIdentity(env)
+    ? createManagedIdentityTokenProvider({ env, scope: AZURE_ENTRA_SCOPE })
+    : noManagedIdentity;
+}
+
+function noManagedIdentity(): Promise<string> {
   return Promise.reject(
     new ImagineError(
       "auth_failed",
-      `Entra authentication for ${AZURE_ID} is not implemented in this build: acquiring a token for ${AZURE_ENTRA_SCOPE} needs a credential library, which is issue #23. Set providers.${AZURE_ID}.auth to "api_key" and providers.${AZURE_ID}.api_key_env to the variable holding your key, or construct AzureProvider yourself with a getAccessToken option.`,
+      `providers.${AZURE_ID}.auth is "entra", but this process has no managed identity to obtain a token for ${AZURE_ENTRA_SCOPE} with: ${IDENTITY_ENDPOINT_ENV} and ${IDENTITY_HEADER_ENV} are not both set. Entra authentication works where the platform provides an identity, such as Azure Container Apps. On a developer machine set providers.${AZURE_ID}.auth to "api_key" and providers.${AZURE_ID}.api_key_env to the variable holding your key, or construct AzureProvider yourself with a getAccessToken option.`,
     ),
   );
 }

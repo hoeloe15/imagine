@@ -45,6 +45,12 @@ param authRequiredScope string = 'access_as_user'
 @description('Accepted issuer. Empty lets the server derive it from the tenant.')
 param authIssuer string = ''
 
+@description('A config.json fragment for the container, as one JSON string. This is how the hosted server learns providers.azure.endpoint, deployments and auth, since the image has no config file. It holds no secrets: api_key_env names environment variables and never key values (ADR 0004, ADR 0022).')
+param imagineConfigJson string = ''
+
+@description('Resource id of the Azure AI Foundry / Azure OpenAI account to grant the container identity Cognitive Services OpenAI User on. It may live in another resource group or subscription. Empty skips the role assignment.')
+param foundryResourceId string = ''
+
 var tags = {
   'azd-env-name': environmentName
 }
@@ -74,6 +80,8 @@ module resources 'resources.bicep' = {
     authExtraAudiences: authExtraAudiences
     authRequiredScope: authRequiredScope
     authIssuer: authIssuer
+    imagineConfigJson: imagineConfigJson
+    foundryResourceId: foundryResourceId
   }
 }
 

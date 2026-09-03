@@ -15,6 +15,12 @@ param authExtraAudiences string
 param authRequiredScope string
 param authIssuer string
 
+@description('A config.json fragment carried in IMAGINE_CONFIG_JSON. Holds no secrets: api_key_env names variables, it never holds key values (ADR 0004, ADR 0022).')
+param imagineConfigJson string = ''
+
+@description('Resource id of the Azure AI Foundry / Azure OpenAI account the container identity gets Cognitive Services OpenAI User on. Empty skips the role assignment.')
+param foundryResourceId string = ''
+
 @description('Port the container listens on. The entrypoint resolves IMAGINE_HTTP_PORT, then PORT, then 8080 (ADR 0018).')
 param targetPort int = 8080
 
@@ -33,6 +39,8 @@ var azureOpenAiSecretName = 'azure-openai-api-key'
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 var keyVaultSecretsOfficerRoleId = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
+// `az role definition list --name "Cognitive Services OpenAI User"`.
+var cognitiveServicesOpenAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
@@ -131,6 +139,25 @@ resource keyVaultSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04
   }
 }
 
+// The Foundry account may live in another resource group, or another
+// subscription, so its id is taken apart rather than assumed to be local:
+// /subscriptions/<id>/resourceGroups/<rg>/providers/<ns>/<type>/<name>.
+var foundryParts = split(foundryResourceId, '/')
+var foundryIsResolvable = length(foundryParts) >= 9
+var foundrySubscriptionId = foundryIsResolvable ? foundryParts[2] : subscription().subscriptionId
+var foundryResourceGroupName = foundryIsResolvable ? foundryParts[4] : resourceGroup().name
+var foundryAccountName = foundryIsResolvable ? last(foundryParts) : ''
+
+module foundryRole 'foundry-role.bicep' = if (!empty(foundryResourceId)) {
+  name: 'imagine-foundry-openai-user'
+  scope: resourceGroup(foundrySubscriptionId, foundryResourceGroupName)
+  params: {
+    accountName: foundryAccountName
+    principalId: identity.properties.principalId
+    roleDefinitionId: cognitiveServicesOpenAiUserRoleId
+  }
+}
+
 var mcpEndpointUrl = 'https://${containerAppName}.${containerAppsEnvironment.properties.defaultDomain}'
 var mcpResourceUri = '${mcpEndpointUrl}/mcp'
 
@@ -214,13 +241,29 @@ var providerEnv = concat(
 // already sets them and ADR 0018 forbids re-declaring them here. PORT is set
 // because Container Apps does not inject it, and the entrypoint's
 // IMAGINE_HTTP_PORT / PORT / 8080 bridge is only real if something sets it.
+// AZURE_CLIENT_ID tells the managed identity endpoint which of the app's
+// identities to mint a token for; with a user-assigned identity the request is
+// ambiguous without it (ADR 0022). IMAGINE_CONFIG_JSON is the container's whole
+// config.json — it carries api_key_env names, never key values.
 var containerEnv = concat(
   [
     {
       name: 'PORT'
       value: string(targetPort)
     }
+    {
+      name: 'AZURE_CLIENT_ID'
+      value: identity.properties.clientId
+    }
   ],
+  empty(imagineConfigJson)
+    ? []
+    : [
+        {
+          name: 'IMAGINE_CONFIG_JSON'
+          value: imagineConfigJson
+        }
+      ],
   providerEnv,
   authEnv
 )
@@ -310,6 +353,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   dependsOn: [
     acrPull
     keyVaultSecretsUser
+    foundryRole
   ]
 }
 

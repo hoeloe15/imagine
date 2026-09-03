@@ -2,8 +2,9 @@
  * Config discovery, merging, validation and API-key resolution.
  *
  * Precedence, least to most specific: bundled defaults, `~/.imagine/config.json`,
- * `./config.json`. Environment variables win over any `.env` file, and a `.env`
- * next to a config file wins over one further up the precedence chain.
+ * `./config.json`, `IMAGINE_CONFIG_JSON`. Environment variables win over any
+ * `.env` file, and a `.env` next to a config file wins over one further up the
+ * precedence chain.
  *
  * **A key value never enters `Config`.** The config only ever names the
  * environment variable holding a key (`api_key_env`), so the whole object is
@@ -37,6 +38,12 @@ export const CONFIG_FILENAME = "config.json";
 export const USER_CONFIG_DIR = ".imagine";
 export const ENV_FILENAME = ".env";
 
+/**
+ * A whole config fragment carried in the environment, for hosts that have no
+ * writable filesystem to put a `config.json` on. See ADR 0022.
+ */
+export const CONFIG_ENV_VAR = "IMAGINE_CONFIG_JSON";
+
 export type Env = Readonly<Record<string, string | undefined>>;
 
 export interface LoadConfigOptions {
@@ -58,6 +65,12 @@ export interface LoadedConfig {
   config: Config;
   /** Config files that contributed, least to most specific. Empty is valid. */
   sources: readonly string[];
+  /**
+   * Everything that contributed, least to most specific: the {@link sources},
+   * then `IMAGINE_CONFIG_JSON` when it carried a fragment. This is what error
+   * messages name, since not every origin is a file.
+   */
+  origins: readonly string[];
   /** `.env` files that were loaded, least to most specific. */
   envFiles: readonly string[];
   /** Ambient environment overlaid on the `.env` files; keys are resolved here. */
@@ -100,6 +113,13 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   }
   const env: Env = Object.freeze({ ...fromEnvFiles, ...ambient });
 
+  const origins = [...sources];
+  const fromEnv = env[CONFIG_ENV_VAR];
+  if (fromEnv !== undefined && fromEnv.trim().length > 0) {
+    origins.push(CONFIG_ENV_VAR);
+    fragments.push(parseFragment(CONFIG_ENV_VAR, fromEnv));
+  }
+
   const merged = fragments.reduce<Record<string, unknown>>(
     (accumulator, fragment) => deepMerge(accumulator, fragment),
     structuredClone(DEFAULT_CONFIG) as unknown as Record<string, unknown>,
@@ -108,13 +128,14 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   const result = configSchema.safeParse(merged);
   if (!result.success) {
     throw configError(
-      `${describeSources(sources)} is not valid:\n${formatIssues(result.error.issues)}`,
+      `${describeSources(origins)} is not valid:\n${formatIssues(result.error.issues)}`,
     );
   }
 
   return {
     config: result.data,
     sources,
+    origins,
     envFiles,
     env,
   };
@@ -139,7 +160,7 @@ export function resolveApiKey(loaded: LoadedConfig, providerId: string): string 
   if (!provider.enabled) {
     throw new ImagineError(
       "invalid_request",
-      `Provider "${providerId}" is disabled. Set providers.${providerId}.enabled to true in ${describeSources(loaded.sources)}.`,
+      `Provider "${providerId}" is disabled. Set providers.${providerId}.enabled to true in ${describeSources(loaded.origins)}.`,
     );
   }
 
@@ -190,20 +211,20 @@ function isNotFound(cause: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR";
 }
 
-function parseFragment(path: string, raw: string): Record<string, unknown> {
+function parseFragment(source: string, raw: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (cause) {
     throw configError(
-      `${path} is not valid JSON: ${describeCause(cause)}. Note that comments and trailing commas are not allowed.`,
+      `${source} is not valid JSON: ${describeCause(cause)}. Note that comments and trailing commas are not allowed.`,
       cause,
     );
   }
 
   const result = configFileSchema.safeParse(parsed);
   if (!result.success) {
-    throw configError(`${path} is not valid:\n${formatIssues(result.error.issues)}`);
+    throw configError(`${source} is not valid:\n${formatIssues(result.error.issues)}`);
   }
 
   const fragment: Record<string, unknown> = { ...result.data };
@@ -276,10 +297,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function describeSources(sources: readonly string[]): string {
-  if (sources.length === 0) return "The built-in default configuration";
-  if (sources.length === 1) return sources[0] as string;
-  return `The configuration merged from ${sources.join(" and ")}`;
+function describeSources(origins: readonly string[]): string {
+  if (origins.length === 0) return "The built-in default configuration";
+  if (origins.length === 1) return origins[0] as string;
+  return `The configuration merged from ${origins.join(" and ")}`;
 }
 
 function formatIssues(issues: readonly z.core.$ZodIssue[]): string {

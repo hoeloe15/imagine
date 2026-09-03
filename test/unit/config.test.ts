@@ -356,3 +356,143 @@ describe("validation failures", () => {
     expect(messageOf(load)).toContain("providers.azure.endpoint");
   });
 });
+
+describe("IMAGINE_CONFIG_JSON", () => {
+  const azureFragment = JSON.stringify({
+    providers: {
+      azure: {
+        enabled: true,
+        auth: "entra",
+        endpoint: "https://hosted.openai.azure.com",
+        deployments: { "gpt-image-2": "hosted-gpt-image-2" },
+      },
+    },
+  });
+
+  it("carries a whole config fragment where no config file exists", () => {
+    const loaded = load({ IMAGINE_CONFIG_JSON: azureFragment });
+
+    expect(loaded.config.providers.azure?.enabled).toBe(true);
+    expect(loaded.config.providers.azure?.endpoint).toBe(
+      "https://hosted.openai.azure.com",
+    );
+    expect(loaded.config.providers.azure?.deployments).toEqual({
+      "gpt-image-2": "hosted-gpt-image-2",
+    });
+    expect(loaded.sources).toEqual([]);
+    expect(loaded.origins).toEqual(["IMAGINE_CONFIG_JSON"]);
+  });
+
+  it("outranks both the user config and the project config", () => {
+    writeUserConfig({ output: { dir: "/user/images" }, logging: { level: "debug" } });
+    writeProjectConfig({ output: { dir: "./project-images" } });
+
+    const loaded = load({
+      IMAGINE_CONFIG_JSON: JSON.stringify({ output: { dir: "/hosted/images" } }),
+    });
+
+    expect(loaded.config.output.dir).toBe("/hosted/images");
+    expect(loaded.config.logging.level).toBe("debug");
+    expect(loaded.origins).toEqual([
+      join(home, ".imagine", "config.json"),
+      join(cwd, "config.json"),
+      "IMAGINE_CONFIG_JSON",
+    ]);
+  });
+
+  it("outranks an explicit --config file too", () => {
+    const explicit = join(root, "explicit.json");
+    writeFileSync(explicit, JSON.stringify({ logging: { level: "warn" } }));
+
+    const loaded = loadConfig({
+      cwd,
+      home,
+      configPath: explicit,
+      env: { IMAGINE_CONFIG_JSON: JSON.stringify({ logging: { level: "error" } }) },
+    });
+
+    expect(loaded.config.logging.level).toBe("error");
+    expect(loaded.sources).toEqual([explicit]);
+  });
+
+  it("merges provider blocks field by field, like a file does", () => {
+    writeProjectConfig({
+      providers: { azure: { api_version: "2025-04-01-preview" } },
+    });
+
+    const loaded = load({ IMAGINE_CONFIG_JSON: azureFragment });
+
+    expect(loaded.config.providers.azure?.api_version).toBe("2025-04-01-preview");
+    expect(loaded.config.providers.azure?.auth).toBe("entra");
+  });
+
+  it("is read from a .env file as well as from the real environment", () => {
+    writeFileSync(
+      join(cwd, ".env"),
+      `IMAGINE_CONFIG_JSON='${JSON.stringify({ logging: { level: "error" } })}'\n`,
+    );
+
+    expect(load().config.logging.level).toBe("error");
+  });
+
+  it("treats unset and empty as absent, so a template may always pass it", () => {
+    expect(load().config).toEqual(DEFAULT_CONFIG);
+    expect(load({ IMAGINE_CONFIG_JSON: "" }).config).toEqual(DEFAULT_CONFIG);
+    expect(load({ IMAGINE_CONFIG_JSON: "   " }).config).toEqual(DEFAULT_CONFIG);
+  });
+
+  it("names IMAGINE_CONFIG_JSON when the value is not JSON", () => {
+    const message = messageOf(() => load({ IMAGINE_CONFIG_JSON: "{not json" }));
+
+    expect(message).toContain("IMAGINE_CONFIG_JSON");
+    expect(message).toContain("not valid JSON");
+  });
+
+  it("names IMAGINE_CONFIG_JSON and the field when the fragment is invalid", () => {
+    const message = messageOf(() =>
+      load({
+        IMAGINE_CONFIG_JSON: JSON.stringify({ budget: { on_exceed: "explode" } }),
+      }),
+    );
+
+    expect(message).toContain("IMAGINE_CONFIG_JSON");
+    expect(message).toContain("budget.on_exceed");
+  });
+
+  it("rejects a key value where the schema expects a variable name", () => {
+    const message = messageOf(() =>
+      load({
+        IMAGINE_CONFIG_JSON: JSON.stringify({
+          providers: { openrouter: { api_key_env: "sk-or-v1-actual-secret" } },
+        }),
+      }),
+    );
+
+    expect(message).toContain("IMAGINE_CONFIG_JSON");
+    expect(message).toContain("providers.openrouter.api_key_env");
+    expect(message).toContain("not a key value");
+  });
+
+  it("rejects an unknown key, exactly as a file would", () => {
+    const message = messageOf(() =>
+      load({ IMAGINE_CONFIG_JSON: JSON.stringify({ outputt: { dir: "./x" } }) }),
+    );
+
+    expect(message).toContain("IMAGINE_CONFIG_JSON");
+  });
+
+  it("names IMAGINE_CONFIG_JSON in the merged-config error alongside the files", () => {
+    writeProjectConfig({ logging: { level: "debug" } });
+    const message = messageOf(() =>
+      load({
+        IMAGINE_CONFIG_JSON: JSON.stringify({
+          providers: { azure: { enabled: true, auth: "entra" } },
+        }),
+      }),
+    );
+
+    expect(message).toContain(join(cwd, "config.json"));
+    expect(message).toContain("IMAGINE_CONFIG_JSON");
+    expect(message).toContain("providers.azure.endpoint");
+  });
+});
