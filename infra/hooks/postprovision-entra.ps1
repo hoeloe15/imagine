@@ -114,7 +114,7 @@ function Invoke-GraphPatch([hashtable] $Body, [string] $What) {
             --headers 'Content-Type=application/json' `
             --body "@$patchFile" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Graph PATCH failed (exit $LASTEXITCODE)" }
-        Write-Host "$What: done"
+        Write-Host "${What}: done"
         return $true
     } catch {
         Write-Warning "Could not update the app registration ($What): $($_.Exception.Message)"
