@@ -25,11 +25,11 @@ What is **not** there yet:
   but no adapter is registered for them, so enabling one only makes
   `list_capabilities` say "no adapter for this provider is registered in this
   build".
-- **Azure authenticates with an API key, not yet with Entra ID.** The endpoint,
-  deployment mapping and both auth modes are implemented, but acquiring an Entra
-  token needs a credential library this build does not carry; with
-  `"auth": "entra"` a call fails with an `auth_failed` saying so. Set
-  `"auth": "api_key"` for now.
+- **Azure Entra authentication needs a managed identity to run under.** With
+  `"auth": "entra"` the server gets its token from the identity the platform
+  provides (Container Apps, App Service). On a developer machine there is none,
+  and a call fails with an `auth_failed` saying so; use `"auth": "api_key"`
+  locally.
 - **The npm release predates the tools.** `imagine-mcp@0.0.1` on npm is the
   scaffold, not this. Until the next release, run it from a clone
   ([Development](#development)).
@@ -201,6 +201,51 @@ One caveat worth knowing before you share the URL with a colleague:
 single bucket shared by everyone talking to that server rather than a per-person
 cap. `max_usd_per_day` behaves the same way.
 
+### Telling Claude where to log in
+
+A `401` on its own says "go away", not "go here". So with authentication on, the
+server also publishes an [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)
+protected-resource document — the small JSON file that tells a Claude client
+which Entra tenant to authenticate against — and points the `401` at it:
+
+```
+WWW-Authenticate: Bearer resource_metadata="https://your-host/.well-known/oauth-protected-resource/mcp", scope="access_as_user"
+```
+
+Both `/.well-known/oauth-protected-resource/mcp` and the bare
+`/.well-known/oauth-protected-resource` serve it, with `GET`, **without a
+token** — a client that cannot read it while unauthenticated can never become
+authenticated. With authentication off, neither path exists at all.
+
+The one thing it needs from you is this server's own public URL, because behind
+a proxy or a container ingress the `Host` header is the internal one and the
+`resource` field has to be the URL **you type into your client**, path included:
+
+| Variable                   | Default                                              | What it does                                                            |
+| -------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------- |
+| `IMAGINE_PUBLIC_URL`       | *(the first `IMAGINE_AUTH_AUDIENCE` that is a URL)*   | The public origin, e.g. `https://your-host`. `/mcp` is appended          |
+| `IMAGINE_MCP_RESOURCE_URI` | *(derived from the above)*                           | The whole endpoint URL, for a proxy that serves it on a different path   |
+
+If you followed the Azure runbook you need neither: the MCP URL is already the
+first accepted audience, and that is what the server falls back to. If it cannot
+work the URL out, it says so in block capitals at startup and serves no
+metadata — Claude then cannot connect, so this is not a warning to skip past.
+
+Check it with:
+
+```sh
+curl -i -X POST https://your-host/mcp -H 'Content-Type: application/json' -d '{}'
+curl -s https://your-host/.well-known/oauth-protected-resource/mcp
+```
+
+The first must be a `401` carrying the header above — Claude ignores a
+`WWW-Authenticate` on a `200`, so a server that answers politely instead of
+refusing never starts a login. The second must be `200`, and its `resource` must
+equal your endpoint URL exactly: same case, same path, no trailing slash. The
+reasoning, and why the Azure deployment uses no platform ("Easy Auth")
+authentication, is in
+[ADR 0021](docs/adr/0021-protected-resource-metadata-and-no-platform-auth.md).
+
 ### Running it in a container
 
 [`Containerfile`](Containerfile) builds the image the Azure deployment runs, and
@@ -239,10 +284,10 @@ OpenRouter enabled and reading `OPENROUTER_API_KEY`; Azure, Google and xAI named
 but disabled; images in `./imagine-output`; a $5 session and $10 daily budget
 that refuses rather than warns.
 
-Config files are merged least- to most-specific: **bundled defaults**, then
+Config is merged least- to most-specific: **bundled defaults**, then
 `~/.imagine/config.json`, then `./config.json` in the server's working
-directory. Every field is optional in a file, so a fragment only contributes what
-it actually names.
+directory, then the `IMAGINE_CONFIG_JSON` environment variable. Every field is
+optional, so a fragment only contributes what it actually names.
 
 > **Where to put it.** The working directory of the server is whatever your MCP
 > client launches it in, which is usually not your project. Prefer
@@ -306,7 +351,7 @@ Everything the schema accepts, with the values it defaults to:
 | `providers.<id>.api_key_env` | The **name** of the environment variable holding the key. Never the key itself.                |
 | `providers.<id>.endpoint`    | Resource URL, for providers that need one. Required when `auth` is `entra`.                     |
 | `providers.<id>.api_version` | API version string. Azure defaults to `2025-04-01-preview`.                                    |
-| `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable, and is not implemented yet.                |
+| `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable, and needs a managed identity to run under. |
 | `providers.<id>.deployments` | Model id → deployment name mapping. Azure needs one entry per model you can reach.             |
 | `output.dir`                 | Where images are written. Relative paths resolve against the server's working directory.        |
 | `output.filename`            | Template over `{slug}`, `{hash}` and `{ext}`. Names a file, never a path.                      |
@@ -340,10 +385,58 @@ name is arbitrary and is not the model id, which is why the mapping exists:
 }
 ```
 
-Entra authentication is reserved in the schema but not implemented yet, so leave
-`auth` at `api_key`. Google and xAI are reserved too: enabling either today gets
-you a `not_configured` entry saying no adapter is registered. See
+Google and xAI are reserved: enabling either today gets you a `not_configured`
+entry saying no adapter is registered. See
 [ADR 0014](docs/adr/0014-azure-openai-adapter.md).
+
+### Azure OpenAI without a key at all
+
+Set `"auth": "entra"` and drop `api_key_env`, and the server authenticates with
+the managed identity of whatever it is running on — no Azure OpenAI key is
+created, stored or rotated anywhere:
+
+```json
+{
+  "providers": {
+    "azure": {
+      "enabled": true,
+      "auth": "entra",
+      "endpoint": "https://my-resource.openai.azure.com",
+      "deployments": { "gpt-image-2": "my-gpt-image-2" }
+    }
+  }
+}
+```
+
+This works where the platform provides an identity — Azure Container Apps and
+App Service both set `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`, which is how the
+server detects it — and the identity needs the **Cognitive Services OpenAI
+User** role on the resource. The azd template of
+[ADR 0020](docs/adr/0020-the-azd-template.md) does both for you.
+
+On a developer machine there is no such identity, and a call fails with a message
+saying so rather than quietly picking up your `az login`. Local development uses
+`"auth": "api_key"` and a `.env`; the environment chooses, not the code. See
+[ADR 0022](docs/adr/0022-hosted-config-and-managed-identity.md).
+
+### `IMAGINE_CONFIG_JSON`, for hosts with no config file
+
+Where there is no filesystem to put a `config.json` on — a container, a serverless
+host — the whole fragment can travel in one environment variable:
+
+```bash
+export IMAGINE_CONFIG_JSON='{"providers":{"azure":{"enabled":true,"auth":"entra","endpoint":"https://my-resource.openai.azure.com","deployments":{"gpt-image-2":"my-gpt-image-2"}}}}'
+```
+
+It is the same schema as a `config.json`, validated the same way — an unknown key
+or a bad value is an error naming `IMAGINE_CONFIG_JSON` and the field — and it is
+merged last, so it wins over every config file including one passed with
+`--config`. Unset or empty means "nothing to add".
+
+**It cannot carry a secret**: `api_key_env` still only accepts the *name* of an
+environment variable, so a pasted key is a validation error rather than a value
+sitting in your deployment history. Keys keep arriving as their own environment
+variables.
 
 ## The three tools
 
@@ -608,9 +701,15 @@ entry in `deployments`.
 the deployment it tried; check it against the deployment list in Azure AI
 Foundry, and remember it is the *deployment* name, not the model name.
 
-**Azure fails with `auth_failed` mentioning issue #23** — `providers.azure.auth`
-is `entra`, which this build cannot get a token for. Switch to `api_key` and set
-the variable `api_key_env` names.
+**Azure fails with `auth_failed` mentioning `IDENTITY_ENDPOINT`** —
+`providers.azure.auth` is `entra` but this process has no managed identity, which
+is normal on a developer machine. Switch to `api_key` and set the variable
+`api_key_env` names, or run it somewhere that provides an identity.
+
+**Azure fails with `auth_failed` and a 403 from the resource** — the managed
+identity has no **Cognitive Services OpenAI User** role on the Foundry resource,
+or the assignment has not propagated yet. Assignments are eventually consistent;
+if you just deployed, wait a minute and try again.
 
 **`"error": "invalid_request"` with "No image provider is available"** — nothing
 is both enabled and credentialled. Set `OPENROUTER_API_KEY`, or check that you
@@ -690,8 +789,7 @@ visible. See [ADR 0005](docs/adr/0005-two-schemas-for-curated-model-knowledge.md
 
 ## Planned features
 
-- Entra ID authentication for Azure OpenAI, then the Google Gemini and xAI Grok
-  adapters
+- The Google Gemini and xAI Grok adapters
 - A published npm release carrying the three tools, installable with `npx`
 - A local web portal for key management and a searchable gallery of everything
   generated, reading the manifest

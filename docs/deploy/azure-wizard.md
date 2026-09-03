@@ -176,6 +176,8 @@ section that needs it. The full list, so nothing is a surprise:
 | `IMAGINE_CONTAINER_IMAGE`             | `ghcr.io/hoeloe15/imagine:edge` | rarely    |
 | `IMAGINE_OPENROUTER_SECRET_IN_VAULT`  | `false`                         | §6        |
 | `IMAGINE_AZURE_OPENAI_SECRET_IN_VAULT`| `false`                         | §6        |
+| `IMAGINE_CONFIG_JSON`                 | — (built-in defaults)           | §6b       |
+| `IMAGINE_FOUNDRY_RESOURCE_ID`         | — (no role assignment)          | §6b       |
 | `IMAGINE_ENTRA_HOOK`                  | `false`                         | §6c       |
 | `IMAGINE_AUTH_ENABLED`                | `false`                         | §6d       |
 | `IMAGINE_AUTH_CLIENT_ID`              | — (hook writes it)              | §6c/§6d   |
@@ -324,6 +326,76 @@ paragraph if it turns out to be wrong.
 
 ---
 
+## 6b. Point the hosted server at Azure OpenAI
+
+Skip this if you only use OpenRouter.
+
+The container has no `~/.imagine/config.json` and nowhere to write one, so the
+whole config fragment travels in one environment variable,
+`IMAGINE_CONFIG_JSON`. It is the same JSON a `config.json` holds, validated the
+same way, and merged after every file (ADR 0022). It carries **no secrets** —
+`api_key_env` only ever names an environment variable, and the schema rejects
+anything that looks like a key — which is why it is an ordinary azd env value
+rather than a vault secret.
+
+The recommended shape uses **no Azure OpenAI key at all**: the container app's
+managed identity gets the token.
+
+```powershell
+$config = '{"providers":{"azure":{"enabled":true,"auth":"entra","endpoint":"https://<your-resource>.openai.azure.com","deployments":{"gpt-image-2":"<your-deployment-name>"}}}}'
+azd env set IMAGINE_CONFIG_JSON $config
+```
+
+`deployments` maps a curated model id to the name **you** gave the deployment in
+Azure AI Foundry. They are usually not the same string, and a mismatch surfaces
+as a 404 that names the deployment it tried.
+
+Then tell the template which resource the identity needs access to. It is
+normally in a different resource group from this deployment, so it is given as a
+full resource id:
+
+```powershell
+az cognitiveservices account list --query "[].{name:name,rg:resourceGroup,id:id}" -o table
+azd env set IMAGINE_FOUNDRY_RESOURCE_ID "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>"
+azd up
+```
+
+That grants the container's user-assigned identity the **Cognitive Services
+OpenAI User** role (`5e0bd9bd-7b93-4f28-af87-19fc36ad61bd`) on that account —
+data-plane inference and nothing more. Leave the variable empty and the role
+assignment is skipped, which is what you want if you would rather grant it by
+hand or the identity already has it.
+
+Check that it took:
+
+```powershell
+$mi = azd env get-value AZURE_MANAGED_IDENTITY_PRINCIPAL_ID
+az role assignment list --assignee $mi --all -o table
+```
+
+Role assignments are eventually consistent. A first `generate_image` that fails
+with a 403 and succeeds a minute later is propagation, not misconfiguration.
+
+**If you would rather use a key**, set `"auth": "api_key"` and
+`"api_key_env": "AZURE_OPENAI_API_KEY"` in the fragment instead, put the key in
+the vault as `azure-openai-api-key` and set
+`IMAGINE_AZURE_OPENAI_SECRET_IN_VAULT true` (step 6). The endpoint and the
+deployment mapping still travel in `IMAGINE_CONFIG_JSON` either way.
+
+Verify what the server ended up with:
+
+```powershell
+$rg  = azd env get-value AZURE_RESOURCE_GROUP
+$app = azd env get-value AZURE_CONTAINER_APP_NAME
+az containerapp show --name $app --resource-group $rg `
+  --query "properties.template.containers[0].env[?name=='IMAGINE_CONFIG_JSON']" -o json
+```
+
+If the fragment is malformed the container will not start, and the log line names
+`IMAGINE_CONFIG_JSON` and the field that is wrong.
+
+---
+
 ## 6c. The Entra app registration
 
 The endpoint is a protected API. That means one app registration in the tenant,
@@ -442,8 +514,12 @@ or empty — read the logs rather than guessing.
 The banner on the container's stderr says which mode it is in. `az containerapp
 logs show --name $app --resource-group $rg` should show `AUTHENTICATED: every
 POST to /mcp needs a Microsoft Entra ID bearer token` and the tenant, issuer,
-audience and scope underneath it. If it still shows the block-capital
-UNAUTHENTICATED warning, the variables did not reach the running revision.
+audience and scope underneath it, followed by the `resource:` and `metadata:`
+lines — the endpoint URL it will publish and the discovery document it will
+serve there (ADR 0021). If it still shows the block-capital UNAUTHENTICATED
+warning, the variables did not reach the running revision. If it shows a
+block-capital warning about protected-resource metadata instead, it could not
+work out its own public URL — §7b says what to look at.
 
 ---
 
@@ -470,19 +546,41 @@ server".
 
 ```powershell
 curl.exe -i -X POST "$fqdn/mcp" -H "Content-Type: application/json" -d "{}"
+curl.exe -i "$fqdn/.well-known/oauth-protected-resource/mcp"
 curl.exe -i "$fqdn/.well-known/oauth-protected-resource"
 ```
 
-Expect `401` plus the header on the first, and `200` with JSON on the second,
-whose `resource` field equals the endpoint URL **exactly**, path included, no
-trailing slash.
+Expect on the first a `401` whose header reads
 
-> **Blocked on #36 and #38.** The template configures no platform ("Easy Auth")
-> authentication at all — that is deliberate, and ADR 0020 says why: #38 is the
-> spike that would settle whether Easy Auth can serve protected-resource
-> metadata, and it has not run. So this route can only answer once #36 ships it
-> in our own code. If it still fails after #36 has merged, that is the finding,
-> not a mistake.
+```
+WWW-Authenticate: Bearer resource_metadata="https://<fqdn>/.well-known/oauth-protected-resource/mcp", scope="access_as_user"
+```
+
+and on both of the others a `200` with JSON whose `resource` field equals the
+endpoint URL **exactly**, path included, no trailing slash — and whose
+`authorization_servers` has one entry, your tenant's
+`https://login.microsoftonline.com/<tenant>/v2.0`.
+
+The container serves all of this itself (ADR 0021). The template configures no
+platform ("Easy Auth") authentication and that is now a permanent decision, not
+a gap: platform auth in `Return401` mode would answer the unauthenticated
+request in front of the container and would stand in front of `/.well-known/*`,
+which is the one route that has to answer without a token. Do not turn it on.
+
+If the metadata comes back `404`, the container could not work out its own
+public URL, and the stderr banner will say so in block capitals instead of
+printing `resource:` and `metadata:` lines. That should not happen here: the
+server derives the URL from the first `IMAGINE_AUTH_AUDIENCE` entry, and the
+template always puts `https://<fqdn>/mcp` first. If it does happen, read
+`IMAGINE_AUTH_AUDIENCE` off the running revision — something has reordered or
+replaced it.
+
+Two variables override that derivation — `IMAGINE_PUBLIC_URL` (the public
+origin) and `IMAGINE_MCP_RESOURCE_URI` (the whole endpoint URL, for a proxy on a
+different path). The template does not set either yet; passing
+`IMAGINE_MCP_RESOURCE_URI` through from the Bicep's `mcpResourceUri` is a
+one-line follow-up on the infrastructure issue and would remove the last piece
+of inference.
 
 **7c. It answers a real tool call.** Get a token and call
 `list_capabilities` — read-only, costs nothing, and tells you whether the key
@@ -592,7 +690,11 @@ Two things that will otherwise waste an afternoon:
   endpoint that leaves Claude Code working will silently break the hosted
   surfaces, and the error you get says "Couldn't reach the MCP server".
 
-> **Blocked on #36 and #48.** The registration side (#44) is section 6c.
+The discovery half of this is done: the endpoint challenges with a
+`resource_metadata` pointer and serves the document it points at (§7b, ADR
+0021), which is what lets the connector dialog get as far as asking Entra for a
+token. What is still open is the **client registration** above — pasting a
+pre-registered Client ID — which is #48.
 
 ---
 
@@ -643,7 +745,22 @@ errors and nothing else.
 - [ ] Whether the AcrPull / Key Vault Secrets User role assignments propagate
       before the container app is created, or whether the first `azd up` needs
       a re-run (#43).
-- [ ] Whether the `/.well-known/*` route answers (#36, #38).
+- [ ] Whether a hosted Claude surface actually completes discovery against the
+      `/.well-known/*` route the container now serves (#36, ADR 0021). The route
+      and the challenge are covered by tests over a real HTTP server; what no
+      test can prove is Claude's own behaviour against a live tenant.
+- [ ] Whether `azd env set IMAGINE_CONFIG_JSON '<json>'` survives the round trip
+      through the azd env file and `main.parameters.json` substitution without
+      the quotes being mangled (§6b).
+- [ ] Whether the Container Apps identity endpoint answers on api-version
+      `2019-08-01` with `expires_on` as epoch seconds, and whether
+      `AZURE_CLIENT_ID` is required or merely accepted with one user-assigned
+      identity (ADR 0022).
+- [ ] Whether `resource=https://ai.azure.com` is the resource the Foundry
+      data plane actually accepts, as opposed to
+      `https://cognitiveservices.azure.com`.
+- [ ] How long the Cognitive Services OpenAI User assignment takes to propagate
+      before the first `generate_image` stops returning 403 (§6b).
 - [ ] Whether `predown` actually runs on `azd down` before the resources go.
 - [ ] Actual `azd up` wall-clock time and actual monthly cost.
 - [ ] Whether admin consent was required in this tenant, and who granted it.
