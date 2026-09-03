@@ -37,15 +37,19 @@ hooks:
   # Reads the azd environment back and says what is still open: an endpoint that
   # is reachable but open, or authenticated but with no provider key. Prints
   # only, never provisions.
+  # interactive: true is what makes azd show the hook's output at all; without
+  # it a print-only hook is silent, which defeats its purpose.
   postdeploy:
     windows:
       shell: pwsh
       run: ./infra/hooks/postdeploy-next-steps.ps1
       continueOnError: true
+      interactive: true
     posix:
       shell: pwsh
       run: ./infra/hooks/postdeploy-next-steps.ps1
       continueOnError: true
+      interactive: true
   predown:
     windows:
       shell: pwsh
