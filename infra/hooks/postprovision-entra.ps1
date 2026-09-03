@@ -161,4 +161,4 @@ Write-Host 'Done. Two things this script cannot do for you:'
 Write-Host '  1. Admin consent for the delegated scope, if the tenant requires it.'
 Write-Host '     az ad app permission admin-consent --id ' -NoNewline; Write-Host $appId
 Write-Host '  2. Turn validation on. It is off until you ask for it:'
-Write-Host '     azd env set IMAGINE_AUTH_ENABLED true; azd provision'
+Write-Host '     azd env set IMAGINE_AUTH_ENABLED true; azd up'

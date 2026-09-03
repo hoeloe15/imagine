@@ -11,12 +11,14 @@ tool result.
 
 ## Status
 
-**Early development, but usable end to end.** The server speaks MCP over stdio
-and exposes all three tools: `generate_image` routes a prompt to a configured
+**Early development, but usable end to end.** `imagine-mcp` is on npm and
+carries all three tools: `generate_image` routes a prompt to a configured
 provider, writes the image to disk and returns its path, what it cost and why
 that model was chosen; `list_capabilities` reports what this installation can
 actually reach right now; `recommend_model` gives advice before you spend
-anything.
+anything. It speaks MCP over stdio for a local client and over Streamable HTTP
+for a shared one, and there is an `azd up` template that puts the HTTP server in
+your own Azure tenant behind Microsoft Entra ID.
 
 What is **not** there yet:
 
@@ -30,12 +32,9 @@ What is **not** there yet:
   provides (Container Apps, App Service). On a developer machine there is none,
   and a call fails with an `auth_failed` saying so; use `"auth": "api_key"`
   locally.
-- **The npm release predates the tools.** `imagine-mcp@0.0.1` on npm is the
-  scaffold, not this. Until the next release, run it from a clone
-  ([Development](#development)).
 - `logging.level` is accepted by the config schema but nothing reads it yet.
-- No web portal, no gallery, no `azd` template. See
-  [PLAN.md](PLAN.md) for the full architecture and phasing.
+- No web portal and no gallery. See [PLAN.md](PLAN.md) for the full architecture
+  and phasing.
 
 ## Quickstart
 
@@ -44,19 +43,17 @@ required.
 
 ### 1. Get the server
 
-Requires Node 20 or newer.
+Requires Node 20 or newer. There is nothing to install and nothing to build:
+the server is published on npm as `imagine-mcp`, and the command your MCP client
+runs is
 
 ```sh
-git clone https://github.com/hoeloe15/imagine.git
-cd imagine
-npm install
-npm run build
+npx -y imagine-mcp@latest
 ```
 
-That produces `dist/index.js`, the stdio server binary.
-
-> Once a release with the tools is published, `npx -y imagine-mcp` replaces this
-> step. The npm `0.0.1` currently on the registry does not have them.
+which fetches the package and starts it on stdio. Step 3 puts that command in
+your client; you never have to run it yourself. Working on imagine itself rather
+than using it? Run it from a clone instead ([Development](#development)).
 
 ### 2. Get an API key
 
@@ -83,12 +80,21 @@ client overrides the file.
 The server speaks MCP over stdio, so it is meant to be launched by a client
 rather than run by hand. In a Claude Code / Claude Desktop style MCP config:
 
+In Claude Code, one command:
+
+```sh
+claude mcp add imagine -- npx -y imagine-mcp@latest
+```
+
+Add `--env OPENROUTER_API_KEY=sk-or-v1-...` if you did not put the key in
+`~/.imagine/.env`. In Claude Desktop, the same thing as a config entry:
+
 ```json
 {
   "mcpServers": {
     "imagine": {
-      "command": "node",
-      "args": ["/absolute/path/to/imagine/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "imagine-mcp@latest"],
       "env": {
         "OPENROUTER_API_KEY": "sk-or-v1-..."
       }
@@ -97,15 +103,11 @@ rather than run by hand. In a Claude Code / Claude Desktop style MCP config:
 }
 ```
 
-In Claude Code the same thing from the command line:
-
-```sh
-claude mcp add imagine --env OPENROUTER_API_KEY=sk-or-v1-... \
-  -- node /absolute/path/to/imagine/dist/index.js
-```
-
-Alternatively, `npm link` in the clone puts an `imagine` binary on your PATH and
-lets you use `"command": "imagine"`.
+Running from a clone instead? Use `"command": "node"` with
+`["/absolute/path/to/imagine/dist/index.js"]`, or `npm link` in the clone, which
+puts an `imagine` binary on your PATH. Inside the clone, `npx imagine-mcp`
+resolves to the local project rather than the registry — see
+[Troubleshooting](#troubleshooting).
 
 ### 4. Ask for an image
 
@@ -124,8 +126,9 @@ another machine — a box on the LAN, a tunnel, a container — the same binary 
 speaks MCP over Streamable HTTP:
 
 ```sh
-node dist/index.js --http
-# or: IMAGINE_TRANSPORT=http node dist/index.js
+npx -y imagine-mcp@latest --http
+# from a clone: node dist/index.js --http
+# or set IMAGINE_TRANSPORT=http instead of passing the flag
 ```
 
 That serves one MCP endpoint at `http://127.0.0.1:3000/mcp`, accepting POST, and
@@ -276,6 +279,103 @@ docker run --rm -p 8080:8080 --read-only \
 Published images are at `ghcr.io/hoeloe15/imagine` — `latest` and the version
 for a release, `edge` for the current `main`. See
 [ADR 0018](docs/adr/0018-the-container-image.md).
+
+## Deploying to Azure
+
+The repo is an `azd` template. From a clone, with the Azure CLI and `azd`
+installed and Docker Desktop running:
+
+```powershell
+azd auth login
+azd env new imagine-dev
+azd up
+```
+
+That provisions, in your own subscription, a resource group holding a Container
+Apps environment and one container app, a container registry, a Key Vault, a
+user-assigned managed identity and a Log Analytics workspace — and builds and
+pushes the image from your working tree. Around two minutes on a warm
+subscription, longer the first time. The app runs with one replica always on,
+deliberately: a scale-to-zero cold start happens inside a tool call and reads to
+the user as a broken connector.
+
+What you get from a bare `azd up` is a reachable **unauthenticated** endpoint
+with **no provider key** — verifiable rather than finished. Three switches close
+that, and the order matters:
+
+| `azd env set …`                      | Default | What it does                                                                 |
+| ------------------------------------ | ------- | ---------------------------------------------------------------------------- |
+| `IMAGINE_ENTRA_HOOK`                 | `false` | Lets the postprovision hook create the Entra app registration for you         |
+| `IMAGINE_AUTH_ENABLED`               | `false` | Makes the container demand a verified Entra bearer token on every `/mcp` POST |
+| `IMAGINE_OPENROUTER_SECRET_IN_VAULT` | `false` | Declares that `openrouter-api-key` is in the vault, so the app may read it    |
+
+**Turn authentication on before you put any key in the vault.** The order is the
+whole point: an open endpoint with no credentials costs a stranger nothing, an
+open endpoint with your OpenRouter key spends your money.
+
+```powershell
+azd env set IMAGINE_ENTRA_HOOK true
+azd env set IMAGINE_AUTH_ENABLED true
+azd up
+# only now:
+az keyvault secret set --vault-name (azd env get-value AZURE_KEY_VAULT_NAME) `
+  --name openrouter-api-key --value "<paste the key>"
+azd env set IMAGINE_OPENROUTER_SECRET_IN_VAULT true
+azd up
+```
+
+Azure OpenAI is the same shape: either a key in the vault as
+`azure-openai-api-key` with `IMAGINE_AZURE_OPENAI_SECRET_IN_VAULT true`, or —
+better — no key at all, by setting `IMAGINE_FOUNDRY_RESOURCE_ID` to the resource
+id of your Foundry account, which grants the container's identity **Cognitive
+Services OpenAI User** on it. Either way the endpoint and the deployment mapping
+travel in
+[`IMAGINE_CONFIG_JSON`](#imagine_config_json-for-hosts-with-no-config-file).
+
+When `azd up` finishes it prints your endpoint and a short **Next steps** block
+that reads the environment back and tells you which of these are still open —
+the same three switches, with the exact command for each. The endpoint is
+`https://<fqdn>`, always available again as:
+
+```powershell
+azd env get-value MCP_ENDPOINT_URL   # https://ca-imagine-....azurecontainerapps.io
+azd env get-value MCP_RESOURCE_URI   # the same, with /mcp
+```
+
+`/healthz` answers `200` whether authentication is on or off. With it on,
+`https://<fqdn>/.well-known/oauth-protected-resource/mcp` is the document that
+tells a Claude client which tenant to log in against.
+
+### Connecting a client to the deployed endpoint
+
+**Claude Code** can carry a bearer token directly:
+
+```powershell
+$fqdn  = azd env get-value MCP_ENDPOINT_URL
+$appId = azd env get-value AZURE_MCP_APP_ID
+$token = az account get-access-token --resource "api://$appId" --query accessToken -o tsv
+claude mcp add --transport http imagine "$fqdn/mcp" --header "Authorization: Bearer $token"
+```
+
+That token expires in about an hour, so it proves the deployment rather than
+being a setup you keep; the runbook's `headersHelper` variant refreshes it.
+
+**Cowork and claude.ai** take the endpoint as a **custom connector**: add
+`https://<fqdn>/mcp` by URL, and Claude reads the protected-resource document,
+discovers your tenant and shows the Microsoft login itself.
+
+### One thing to know before you share it
+
+The app registration is **single-tenant** (`AzureADMyOrg`), so only identities in
+the tenant you deployed into can sign in. A colleague in another tenant is not a
+permissions problem you can fix from the portal — it is a second `azd env` and a
+second `azd up` in that tenant.
+
+The full runbook — the tenant permissions you need, the manual app registration
+for when you cannot create one, every verification step, and tearing it all down
+— is [docs/deploy/azure-wizard.md](docs/deploy/azure-wizard.md). The reasoning is
+in [ADR 0020](docs/adr/0020-the-azd-template.md) and
+[ADR 0022](docs/adr/0022-hosted-config-and-managed-identity.md).
 
 ## Configuring it
 
@@ -790,10 +890,10 @@ visible. See [ADR 0005](docs/adr/0005-two-schemas-for-curated-model-knowledge.md
 ## Planned features
 
 - The Google Gemini and xAI Grok adapters
-- A published npm release carrying the three tools, installable with `npx`
 - A local web portal for key management and a searchable gallery of everything
   generated, reading the manifest
-- An `azd up` template for a governed deployment in your own Azure tenant
+- A pre-registered OAuth client for claude.ai and Claude Desktop, so a custom
+  connector needs no hand-made second app registration
 
 ## Documentation
 
