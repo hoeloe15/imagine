@@ -164,7 +164,11 @@ var mcpResourceUri = '${mcpEndpointUrl}/mcp'
 // Claude sends the full MCP URL as the RFC 8707 `resource`, so that URL is
 // always an accepted audience; api://<client-id> is what `az account
 // get-access-token` asks for (research §3.3).
-var apiAudience = empty(authClientId) ? '' : ',api://${authClientId}'
+// Entra v2 access tokens carry the bare client id as `aud`, whichever
+// identifier URI the scope was requested through - found on the first
+// authenticated run, when a token minted for api://<id>/access_as_user
+// arrived with aud=<id>. The bare id is the audience that actually matches.
+var apiAudience = empty(authClientId) ? '' : ',api://${authClientId},${authClientId}'
 var extraAudience = empty(authExtraAudiences) ? '' : ',${authExtraAudiences}'
 var authAudiences = '${mcpResourceUri}${apiAudience}${extraAudience}'
 
