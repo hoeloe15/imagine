@@ -1,93 +1,67 @@
 # imagine
 
-A capability router for image generation, exposed as an MCP server. AI clients
-like Claude Code, Codex and Cursor can generate images through one stable tool
-interface while the providers behind it — Azure OpenAI, OpenRouter, Google
-Gemini, xAI — stay swappable. It ships with curated, regularly updated knowledge
-about which image model is good at what and what it costs, so the client can pick
-deliberately instead of relying on a choice hard-coded months ago. Generated
-images are written to disk and returned as a file path, never as base64 in the
-tool result.
+![A robot hand painting a lighthouse into the empty grey placeholder on a slide](docs/assets/readme-hero.png)
 
-## Status
+*(Made by imagine, of course — gpt-image-2 via Azure, $0.19, one prompt.)*
 
-**Early development, but usable end to end.** `imagine-mcp` is on npm and
-carries all three tools: `generate_image` routes a prompt to a configured
-provider, writes the image to disk and returns its path, what it cost and why
-that model was chosen; `list_capabilities` reports what this installation can
-actually reach right now; `recommend_model` gives advice before you spend
-anything. It speaks MCP over stdio for a local client and over Streamable HTTP
-for a shared one, and there is an `azd up` template that puts the HTTP server in
-your own Azure tenant behind Microsoft Entra ID.
+Your AI writes a great deck and then leaves grey rectangles where the pictures
+should be. It can describe the illustration for slide 4 perfectly; it just has no
+hand to draw it with. `imagine` is that hand: one MCP server that any AI client
+can call to make an image, with curated knowledge of which model is actually good
+at what and what it costs — so the client picks the right one this month rather
+than the one someone hard-coded last year. The picture lands on disk, the client
+gets a file path, and every generation comes with a receipt.
 
-What is **not** there yet:
+**Early development, but usable end to end.** It runs on your laptop with one
+API key, or in your own Azure tenant behind a Microsoft login.
 
-- **Only the OpenRouter and Azure OpenAI adapters exist.** The config vocabulary
-  also covers Google and xAI, and `data/models.json` records their availability,
-  but no adapter is registered for them, so enabling one only makes
-  `list_capabilities` say "no adapter for this provider is registered in this
-  build".
-- **Azure Entra authentication needs a managed identity to run under.** With
-  `"auth": "entra"` the server gets its token from the identity the platform
-  provides (Container Apps, App Service). On a developer machine there is none,
-  and a call fails with an `auth_failed` saying so; use `"auth": "api_key"`
-  locally.
-- `logging.level` is accepted by the config schema but nothing reads it yet.
-- No web portal and no gallery. See [PLAN.md](PLAN.md) for the full architecture
-  and phasing.
+## What it does
 
-## Quickstart
+Three tools, and your AI decides when to use them.
 
-Zero to a generated image: one OpenRouter key, one JSON snippet, no config file
-required.
+**`generate_image`** makes one picture, writes it to disk and hands back the
+path, the cost and why that model was chosen. The image bytes never travel back
+through the conversation.
 
-### 1. Get the server
+> "Make me a flat vector illustration of a lighthouse at dusk for slide 4."
 
-Requires Node 20 or newer. There is nothing to install and nothing to build:
-the server is published on npm as `imagine-mcp`, and the command your MCP client
-runs is
+**`list_capabilities`** says what this installation can actually reach right
+now: which providers are ready, which are waiting on a key, which models are
+available, what you have spent today.
 
-```sh
-npx -y imagine-mcp@latest
-```
+> "What image models can you get to, and how much have we spent?"
 
-which fetches the package and starts it on stdio. Step 3 puts that command in
-your client; you never have to run it yourself. Working on imagine itself rather
-than using it? Run it from a clone instead ([Development](#development)).
+**`recommend_model`** gives advice before you spend anything — it calls no
+provider and costs nothing.
 
-### 2. Get an API key
+> "I need 20 illustrations for a deck. What should we use, and what will it
+> cost?"
 
-Create a key at [openrouter.ai](https://openrouter.ai/keys) and put it in the
-environment as `OPENROUTER_API_KEY`. That is the only credential the default
-configuration needs — OpenRouter is enabled out of the box and every one of the
-four curated models is reachable through it.
+The full argument tables and response envelopes are in
+[docs/tools.md](docs/tools.md).
 
-You can pass the key in the MCP client's `env` block (below), or put it in a
-`.env` file that the server picks up:
+## Use it on your machine (2 minutes)
+
+You need Node 20 or newer. There is nothing to install and nothing to build.
+
+**1. Get a key.** Create one at [openrouter.ai](https://openrouter.ai/keys).
+That is the only credential you need — OpenRouter is enabled out of the box and
+all four curated models are reachable through it.
+
+**2. Put it in a file** at `~/.imagine/.env`:
 
 ```sh
 # ~/.imagine/.env
 OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-`.env` files are read from `~/.imagine/`, from the directory of any config file
-that was found, and from the server's working directory. **The ambient
-environment always wins over a `.env` file**, so an `env` block in your MCP
-client overrides the file.
-
-### 3. Register it with your MCP client
-
-The server speaks MCP over stdio, so it is meant to be launched by a client
-rather than run by hand. In a Claude Code / Claude Desktop style MCP config:
-
-In Claude Code, one command:
+**3. Tell your client about it.** In Claude Code, one command:
 
 ```sh
 claude mcp add imagine -- npx -y imagine-mcp@latest
 ```
 
-Add `--env OPENROUTER_API_KEY=sk-or-v1-...` if you did not put the key in
-`~/.imagine/.env`. In Claude Desktop, the same thing as a config entry:
+In Claude Desktop, the same thing as a config entry:
 
 ```json
 {
@@ -103,187 +77,41 @@ Add `--env OPENROUTER_API_KEY=sk-or-v1-...` if you did not put the key in
 }
 ```
 
-Running from a clone instead? Use `"command": "node"` with
-`["/absolute/path/to/imagine/dist/index.js"]`, or `npm link` in the clone, which
-puts an `imagine` binary on your PATH. Inside the clone, `npx imagine-mcp`
-resolves to the local project rather than the registry — see
-[Troubleshooting](#troubleshooting).
+(You can pass the key here instead of in the `.env` file — in Claude Code that
+is `--env OPENROUTER_API_KEY=sk-or-v1-...`. The real environment always wins
+over the file.)
 
-### 4. Ask for an image
+**4. Start a new chat and ask for a picture.** The image lands in
+`./imagine-output` and your assistant gets a path to drop into your document.
 
-Restart the client, then ask it for a picture. Behind the scenes it calls
-`generate_image`, the image lands in `./imagine-output` and the model gets back a
-file path to put in your document.
+> **Don't run `npx -y imagine-mcp@latest` yourself — and if you do, silence is
+> normal.** It starts, waits for an MCP client to talk to it over stdin, and
+> sits there looking broken. It isn't. That command is for your MCP client to
+> run, not for you. (And a missing key doesn't stop it starting either: it comes
+> up anyway and answers with a friendly failure naming the variable it wanted,
+> because a server that refuses to start can't tell you why.)
 
-**A missing key does not stop the server from starting.** It starts anyway and
-answers with a failure envelope naming the variable it wanted — a client that
-cannot start the server cannot show you why.
+Prefer Azure OpenAI, your own resource, your own quota? That is a few lines of
+config — see [docs/configuration.md](docs/configuration.md#azure-openai).
 
-## Running over HTTP
+## Put it in the cloud (and why you'd want to)
 
-Stdio is the default and is what you want on your own machine. For a server on
-another machine — a box on the LAN, a tunnel, a container — the same binary also
-speaks MCP over Streamable HTTP:
+Running it on your laptop is the fast way in. Putting it in your own Azure tenant
+buys you five things:
 
-```sh
-npx -y imagine-mcp@latest --http
-# from a clone: node dist/index.js --http
-# or set IMAGINE_TRANSPORT=http instead of passing the flag
-```
+- **The same toolbox on every device** — laptop, desktop, phone, all pointing at
+  one URL.
+- **A login instead of keys everywhere.** You sign in with your work account;
+  no API key sits on any laptop.
+- **Share it with your team** by sending them the URL.
+- **Azure OpenAI with no key at all**, using the managed identity of the app —
+  nothing to store, nothing to rotate.
+- **A cost log that survives restarts**, so the spend is still there tomorrow.
 
-That serves one MCP endpoint at `http://127.0.0.1:3000/mcp`, accepting POST, and
-a separate health endpoint at `http://127.0.0.1:3000/healthz`. Point Claude Code
-at it with:
+### How
 
-```sh
-claude mcp add --transport http imagine http://127.0.0.1:3000/mcp
-```
-
-> ### ⚠️ The HTTP endpoint is UNAUTHENTICATED until you configure a tenant
->
-> Out of the box there is no authentication. Anyone who can reach the port can
-> generate images, **spend your provider credits** and read the files the server
-> writes. It binds to `127.0.0.1` for that reason, and it prints the same warning
-> every time it starts. Before putting it on an address anyone else can reach,
-> set the `IMAGINE_AUTH_*` variables below — the banner then flips to say what it
-> is enforcing.
-
-Four environment variables configure the listener:
-
-| Variable                       | Default     | What it does                                                       |
-| ------------------------------ | ----------- | ------------------------------------------------------------------ |
-| `IMAGINE_TRANSPORT`            | `stdio`     | `http` starts the HTTP listener instead of stdio                   |
-| `IMAGINE_HTTP_HOST`            | `127.0.0.1` | Bind address. Widening it is an explicit choice                    |
-| `IMAGINE_HTTP_PORT`            | `3000`      | Port. `0` picks a free one and prints it                           |
-| `IMAGINE_HTTP_ALLOWED_ORIGINS` | *(empty)*   | Comma-separated browser origins allowed to call `/mcp`             |
-
-Requests are handled statelessly: no sessions, nothing kept between calls. A
-browser request whose `Origin` is neither the server's own nor a loopback
-address nor on the allow-list gets a `403`, which is what blocks DNS rebinding.
-Requests with no `Origin` — every desktop MCP client — are unaffected. A `GET` on
-`/mcp` answers `405`; probe `/healthz` instead. See
-[ADR 0016](docs/adr/0016-streamable-http-transport.md).
-
-### Requiring a Microsoft Entra ID token
-
-Set these and every POST to `/mcp` must carry a bearer token this server has
-verified itself — signature against the tenant's published keys, issuer,
-audience, tenant, expiry and permission — before any tool runs. `/healthz` stays
-open so probes keep working.
-
-| Variable                      | Default                                             | What it does                                                        |
-| ----------------------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
-| `IMAGINE_AUTH_TENANT_ID`      | *(empty — auth off)*                                | The Entra tenant whose signing keys and `tid` are accepted           |
-| `IMAGINE_AUTH_AUDIENCE`       | *(required once auth is on)*                        | Accepted `aud`, comma-separated. Include the MCP URL itself          |
-| `IMAGINE_AUTH_ISSUER`         | `https://login.microsoftonline.com/<tenant>/v2.0`   | Accepted `iss`                                                       |
-| `IMAGINE_AUTH_REQUIRED_SCOPE` | `access_as_user`                                    | Accepted `scp` entries or app `roles` entries; any one is enough     |
-
-With none of them set the endpoint is open, exactly as before. With some of them
-set but not the tenant or the audience, the server refuses to start rather than
-quietly serving an open endpoint.
-
-A request with no token, an expired one, one minted for another audience, tenant
-or issuer, or one whose signature does not check out gets a `401` with a
-`WWW-Authenticate: Bearer` challenge and a JSON-RPC error body. A valid token
-without the required permission gets `403 insufficient_scope`. Claude Code can
-present the token directly:
-
-```sh
-claude mcp add --transport http imagine https://your-host/mcp \
-  --header "Authorization: Bearer $(az account get-access-token \
-    --resource https://your-host/mcp --query accessToken -o tsv)"
-```
-
-Registering the app in Entra — including the Application ID URI trap that makes
-the MCP URL itself a valid audience — is in
-[docs/deploy/azure-wizard.md](docs/deploy/azure-wizard.md); the reasoning is in
-[ADR 0017](docs/adr/0017-entra-bearer-token-validation.md).
-
-One caveat worth knowing before you share the URL with a colleague:
-`budget.max_usd_per_session` is enforced per process, so over HTTP it becomes a
-single bucket shared by everyone talking to that server rather than a per-person
-cap. `max_usd_per_day` behaves the same way.
-
-### Telling Claude where to log in
-
-A `401` on its own says "go away", not "go here". So with authentication on, the
-server also publishes an [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)
-protected-resource document — the small JSON file that tells a Claude client
-which Entra tenant to authenticate against — and points the `401` at it:
-
-```
-WWW-Authenticate: Bearer resource_metadata="https://your-host/.well-known/oauth-protected-resource/mcp", scope="access_as_user"
-```
-
-Both `/.well-known/oauth-protected-resource/mcp` and the bare
-`/.well-known/oauth-protected-resource` serve it, with `GET`, **without a
-token** — a client that cannot read it while unauthenticated can never become
-authenticated. With authentication off, neither path exists at all.
-
-The one thing it needs from you is this server's own public URL, because behind
-a proxy or a container ingress the `Host` header is the internal one and the
-`resource` field has to be the URL **you type into your client**, path included:
-
-| Variable                   | Default                                              | What it does                                                            |
-| -------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------- |
-| `IMAGINE_PUBLIC_URL`       | *(the first `IMAGINE_AUTH_AUDIENCE` that is a URL)*   | The public origin, e.g. `https://your-host`. `/mcp` is appended          |
-| `IMAGINE_MCP_RESOURCE_URI` | *(derived from the above)*                           | The whole endpoint URL, for a proxy that serves it on a different path   |
-
-If you followed the Azure runbook you need neither: the MCP URL is already the
-first accepted audience, and that is what the server falls back to. If it cannot
-work the URL out, it says so in block capitals at startup and serves no
-metadata — Claude then cannot connect, so this is not a warning to skip past.
-
-Check it with:
-
-```sh
-curl -i -X POST https://your-host/mcp -H 'Content-Type: application/json' -d '{}'
-curl -s https://your-host/.well-known/oauth-protected-resource/mcp
-```
-
-The first must be a `401` carrying the header above — Claude ignores a
-`WWW-Authenticate` on a `200`, so a server that answers politely instead of
-refusing never starts a login. The second must be `200`, and its `resource` must
-equal your endpoint URL exactly: same case, same path, no trailing slash. The
-reasoning, and why the Azure deployment uses no platform ("Easy Auth")
-authentication, is in
-[ADR 0021](docs/adr/0021-protected-resource-metadata-and-no-platform-auth.md).
-
-### Running it in a container
-
-[`Containerfile`](Containerfile) builds the image the Azure deployment runs, and
-it works the same on your own machine:
-
-```sh
-docker build -f Containerfile -t imagine .
-docker run --rm -p 8080:8080 -e OPENROUTER_API_KEY=... imagine
-```
-
-That serves `http://127.0.0.1:8080/mcp` and `http://127.0.0.1:8080/healthz`. The
-image sets `IMAGINE_TRANSPORT=http` and `IMAGINE_HTTP_HOST=0.0.0.0` — binding
-wide is correct inside a container and nowhere else — runs as an unprivileged
-user, and listens on `IMAGINE_HTTP_PORT`, falling back to `PORT` (the Container
-Apps convention) and then `8080`. The warning above still applies: nothing in
-the image authenticates the endpoint.
-
-Images, the manifest and the cost ledger are written to `/app/imagine-output`.
-Mount something there to keep them, and mount something writable there if you
-run with `--read-only`:
-
-```sh
-docker run --rm -p 8080:8080 --read-only \
-  --tmpfs /app/imagine-output:uid=1000,gid=1000 \
-  -e OPENROUTER_API_KEY=... imagine
-```
-
-Published images are at `ghcr.io/hoeloe15/imagine` — `latest` and the version
-for a release, `edge` for the current `main`. See
-[ADR 0018](docs/adr/0018-the-container-image.md).
-
-## Deploying to Azure
-
-The repo is an `azd` template. From a clone, with the Azure CLI and `azd`
-installed and Docker Desktop running:
+You need a clone of this repo, the Azure CLI, `azd`, and Docker Desktop running.
+Then:
 
 ```powershell
 azd auth login
@@ -291,16 +119,8 @@ azd env new imagine-dev
 azd up
 ```
 
-That provisions, in your own subscription, a resource group holding a Container
-Apps environment and one container app, a container registry, a Key Vault, a
-user-assigned managed identity and a Log Analytics workspace — and builds and
-pushes the image from your working tree. Around two minutes on a warm
-subscription, longer the first time. The app runs with one replica always on,
-deliberately: a scale-to-zero cold start happens inside a tool call and reads to
-the user as a broken connector.
-
-What you get from a bare `azd up` is a reachable **unauthenticated** endpoint
-with **no provider key** — verifiable rather than finished. Three switches close
+A bare `azd up` gives you a reachable endpoint that is **unauthenticated** and
+has **no provider key** — verifiable rather than finished. Three switches close
 that, and the order matters:
 
 | `azd env set …`                      | Default | What it does                                                                 |
@@ -309,9 +129,9 @@ that, and the order matters:
 | `IMAGINE_AUTH_ENABLED`               | `false` | Makes the container demand a verified Entra bearer token on every `/mcp` POST |
 | `IMAGINE_OPENROUTER_SECRET_IN_VAULT` | `false` | Declares that `openrouter-api-key` is in the vault, so the app may read it    |
 
-**Turn authentication on before you put any key in the vault.** The order is the
-whole point: an open endpoint with no credentials costs a stranger nothing, an
-open endpoint with your OpenRouter key spends your money.
+**Turn authentication on before you put any key in the vault.** That is the
+whole point of the order: an open endpoint with no credentials costs a stranger
+nothing, an open endpoint with your OpenRouter key spends your money.
 
 ```powershell
 azd env set IMAGINE_ENTRA_HOOK true
@@ -324,29 +144,16 @@ azd env set IMAGINE_OPENROUTER_SECRET_IN_VAULT true
 azd up
 ```
 
-Azure OpenAI is the same shape: either a key in the vault as
-`azure-openai-api-key` with `IMAGINE_AZURE_OPENAI_SECRET_IN_VAULT true`, or —
-better — no key at all, by setting `IMAGINE_FOUNDRY_RESOURCE_ID` to the resource
-id of your Foundry account, which grants the container's identity **Cognitive
-Services OpenAI User** on it. Either way the endpoint and the deployment mapping
-travel in
-[`IMAGINE_CONFIG_JSON`](#imagine_config_json-for-hosts-with-no-config-file).
+**The terminal then tells you what's next.** When `azd up` finishes it prints
+your endpoint and a short **Next steps** block that reads the environment back
+and says which of those three switches are still open, with the exact command
+for each.
 
-When `azd up` finishes it prints your endpoint and a short **Next steps** block
-that reads the environment back and tells you which of these are still open —
-the same three switches, with the exact command for each. The endpoint is
-`https://<fqdn>`, always available again as:
+### Connecting to it
 
-```powershell
-azd env get-value MCP_ENDPOINT_URL   # https://ca-imagine-....azurecontainerapps.io
-azd env get-value MCP_RESOURCE_URI   # the same, with /mcp
-```
-
-`/healthz` answers `200` whether authentication is on or off. With it on,
-`https://<fqdn>/.well-known/oauth-protected-resource/mcp` is the document that
-tells a Claude client which tenant to log in against.
-
-### Connecting a client to the deployed endpoint
+**Cowork and claude.ai** take the endpoint as a **custom connector**: add
+`https://<fqdn>/mcp` by URL, and Claude reads the server's protected-resource
+document, discovers your tenant and shows the Microsoft login itself.
 
 **Claude Code** can carry a bearer token directly:
 
@@ -360,543 +167,111 @@ claude mcp add --transport http imagine "$fqdn/mcp" --header "Authorization: Bea
 That token expires in about an hour, so it proves the deployment rather than
 being a setup you keep; the runbook's `headersHelper` variant refreshes it.
 
-**Cowork and claude.ai** take the endpoint as a **custom connector**: add
-`https://<fqdn>/mcp` by URL, and Claude reads the protected-resource document,
-discovers your tenant and shows the Microsoft login itself.
-
-### One thing to know before you share it
-
-The app registration is **single-tenant** (`AzureADMyOrg`), so only identities in
-the tenant you deployed into can sign in. A colleague in another tenant is not a
-permissions problem you can fix from the portal — it is a second `azd env` and a
-second `azd up` in that tenant.
-
-The full runbook — the tenant permissions you need, the manual app registration
-for when you cannot create one, every verification step, and tearing it all down
-— is [docs/deploy/azure-wizard.md](docs/deploy/azure-wizard.md). The reasoning is
-in [ADR 0020](docs/adr/0020-the-azd-template.md) and
-[ADR 0022](docs/adr/0022-hosted-config-and-managed-identity.md).
-
-## Configuring it
-
-Configuration is optional. The bundled defaults are a working zero-config setup:
-OpenRouter enabled and reading `OPENROUTER_API_KEY`; Azure, Google and xAI named
-but disabled; images in `./imagine-output`; a $5 session and $10 daily budget
-that refuses rather than warns.
-
-Config is merged least- to most-specific: **bundled defaults**, then
-`~/.imagine/config.json`, then `./config.json` in the server's working
-directory, then the `IMAGINE_CONFIG_JSON` environment variable. Every field is
-optional, so a fragment only contributes what it actually names.
-
-> **Where to put it.** The working directory of the server is whatever your MCP
-> client launches it in, which is usually not your project. Prefer
-> `~/.imagine/config.json` and absolute paths for `output.dir` unless you
-> deliberately want per-project config.
-
-A minimal `config.json` — the `$schema` line gives you completion and validation
-in any editor with JSON Schema support:
-
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/config.schema.json",
-  "output": {
-    "dir": "/Users/you/Pictures/imagine"
-  },
-  "budget": {
-    "max_usd_per_day": 2
-  }
-}
-```
-
-Everything the schema accepts, with the values it defaults to:
-
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/config.schema.json",
-  "default": {
-    "model": null,
-    "size": "1024x1024",
-    "use_case": null
-  },
-  "providers": {
-    "openrouter": { "enabled": true, "api_key_env": "OPENROUTER_API_KEY" },
-    "azure": { "enabled": false, "api_key_env": "AZURE_OPENAI_API_KEY" },
-    "google": { "enabled": false, "api_key_env": "GOOGLE_API_KEY" },
-    "xai": { "enabled": false, "api_key_env": "XAI_API_KEY" }
-  },
-  "output": {
-    "dir": "./imagine-output",
-    "filename": "{slug}-{hash}.{ext}",
-    "manifest": "./imagine-output/manifest.jsonl"
-  },
-  "budget": {
-    "max_usd_per_session": 5,
-    "max_usd_per_day": 10,
-    "on_exceed": "refuse"
-  },
-  "logging": {
-    "level": "info",
-    "cost_log": "./imagine-output/costs.jsonl"
-  }
-}
-```
-
-| Key                          | What it does                                                                                   |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `default.model`              | Curated model id used when a call gives no hint and no use case. `null` lets the router rank.   |
-| `default.size`               | One of `1024x1024`, `1536x1024`, `1024x1536`, `auto`.                                          |
-| `default.use_case`           | One of `text_in_image`, `photoreal`, `illustration`, `diagram`, `fast_bulk`, or `null`.        |
-| `providers.<id>.enabled`     | Whether the router may route to it at all.                                                     |
-| `providers.<id>.api_key_env` | The **name** of the environment variable holding the key. Never the key itself.                |
-| `providers.<id>.endpoint`    | Resource URL, for providers that need one. Required when `auth` is `entra`.                     |
-| `providers.<id>.api_version` | API version string. Azure defaults to `2025-04-01-preview`.                                    |
-| `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable, and needs a managed identity to run under. |
-| `providers.<id>.deployments` | Model id → deployment name mapping. Azure needs one entry per model you can reach.             |
-| `output.dir`                 | Where images are written. Relative paths resolve against the server's working directory.        |
-| `output.filename`            | Template over `{slug}`, `{hash}` and `{ext}`. Names a file, never a path.                      |
-| `output.manifest`            | JSONL log of every image. `null` falls back to `manifest.jsonl` inside the output directory.    |
-| `budget.max_usd_per_session` | Cap for one server process. `null` for no cap.                                                 |
-| `budget.max_usd_per_day`     | Cap for one local calendar day, across restarts. `null` for no cap.                            |
-| `budget.on_exceed`           | `refuse` to block the call, `warn` to run it and flag it.                                      |
-| `logging.level`              | `error`, `warn`, `info`, `debug`. Accepted but not yet read.                                   |
-| `logging.cost_log`           | Append-only JSONL cost ledger. `null` keeps spend in memory only.                              |
-
-**No key value ever goes in the config file.** `api_key_env` names the variable;
-the whole config object is therefore safe to log, and `list_capabilities` can
-report a missing credential by naming the variable without ever reading it. See
-[ADR 0004](docs/adr/0004-config-loading-and-key-resolution.md).
-
-Azure OpenAI is implemented. Point it at your resource, name the key variable,
-and map each curated model id to the name of your deployment — the deployment
-name is arbitrary and is not the model id, which is why the mapping exists:
-
-```json
-{
-  "providers": {
-    "azure": {
-      "enabled": true,
-      "auth": "api_key",
-      "api_key_env": "AZURE_OPENAI_API_KEY",
-      "endpoint": "https://my-resource.openai.azure.com",
-      "deployments": { "gpt-image-2": "my-gpt-image-2" }
-    }
-  }
-}
-```
-
-Google and xAI are reserved: enabling either today gets you a `not_configured`
-entry saying no adapter is registered. See
-[ADR 0014](docs/adr/0014-azure-openai-adapter.md).
-
-### Azure OpenAI without a key at all
-
-Set `"auth": "entra"` and drop `api_key_env`, and the server authenticates with
-the managed identity of whatever it is running on — no Azure OpenAI key is
-created, stored or rotated anywhere:
-
-```json
-{
-  "providers": {
-    "azure": {
-      "enabled": true,
-      "auth": "entra",
-      "endpoint": "https://my-resource.openai.azure.com",
-      "deployments": { "gpt-image-2": "my-gpt-image-2" }
-    }
-  }
-}
-```
-
-This works where the platform provides an identity — Azure Container Apps and
-App Service both set `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`, which is how the
-server detects it — and the identity needs the **Cognitive Services OpenAI
-User** role on the resource. The azd template of
-[ADR 0020](docs/adr/0020-the-azd-template.md) does both for you.
-
-On a developer machine there is no such identity, and a call fails with a message
-saying so rather than quietly picking up your `az login`. Local development uses
-`"auth": "api_key"` and a `.env`; the environment chooses, not the code. See
-[ADR 0022](docs/adr/0022-hosted-config-and-managed-identity.md).
-
-### `IMAGINE_CONFIG_JSON`, for hosts with no config file
-
-Where there is no filesystem to put a `config.json` on — a container, a serverless
-host — the whole fragment can travel in one environment variable:
-
-```bash
-export IMAGINE_CONFIG_JSON='{"providers":{"azure":{"enabled":true,"auth":"entra","endpoint":"https://my-resource.openai.azure.com","deployments":{"gpt-image-2":"my-gpt-image-2"}}}}'
-```
-
-It is the same schema as a `config.json`, validated the same way — an unknown key
-or a bad value is an error naming `IMAGINE_CONFIG_JSON` and the field — and it is
-merged last, so it wins over every config file including one passed with
-`--config`. Unset or empty means "nothing to add".
-
-**It cannot carry a secret**: `api_key_env` still only accepts the *name* of an
-environment variable, so a pasted key is a validation error rather than a value
-sitting in your deployment history. Keys keep arriving as their own environment
-variables.
-
-## The three tools
-
-### `generate_image`
-
-Generates one image, writes it to disk and returns the path plus what it cost.
-The bytes never travel back to the client
-([why](docs/adr/0010-mcp-server-and-the-generate-image-tool.md)).
-
-| Argument        | Type                                                        | Required |
-| --------------- | ----------------------------------------------------------- | -------- |
-| `prompt`        | string                                                      | yes      |
-| `size`          | `1024x1024` \| `1536x1024` \| `1024x1536` \| `auto`         | no       |
-| `style`         | string, e.g. `"flat vector illustration"`                   | no       |
-| `use_case`      | `text_in_image` \| `photoreal` \| `illustration` \| `diagram` \| `fast_bulk` | no |
-| `provider_hint` | string — a provider id or a full model id                   | no       |
-| `output_dir`    | string — overrides `output.dir` for this call               | no       |
-
-`provider_hint` is a hint, never a contract. When it cannot be honoured the
-router picks anyway and says so in `selection_reason`
-([ADR 0007](docs/adr/0007-router-selection-and-fallback.md)).
-
-```json
-{
-  "prompt": "A flat vector illustration of a lighthouse at dusk",
-  "use_case": "illustration",
-  "size": "1536x1024"
-}
-```
-
-```json
-{
-  "path": "/Users/you/Pictures/imagine/a-flat-vector-illustration-of-a-lighthouse-at-dusk-7f3ac91d.png",
-  "provider": "openrouter",
-  "model": "google/gemini-3.1-flash-image",
-  "cost_usd": 0.039,
-  "duration_ms": 4180,
-  "width": 1536,
-  "height": 1024,
-  "selection_reason": "use_case=illustration; highest-scoring available model for illustration at the lowest price",
-  "budget": {
-    "session_spent_usd": 0.039,
-    "session_limit_usd": 5
-  }
-}
-```
-
-A failure comes back as a tool result rather than a protocol error, so the
-calling model can read it and act:
-
-```json
-{
-  "error": "auth_failed",
-  "message": "Environment variable OPENROUTER_API_KEY is not set, and providers.openrouter.api_key_env names it as the source of the openrouter key. Set it in your environment or in a .env file next to your config.",
-  "provider": null,
-  "model": null,
-  "cost_usd": 0,
-  "retryable": false,
-  "suggestion": "Check that the environment variable naming this provider's key is set and holds a valid key, or name another provider with provider_hint."
-}
-```
-
-`error` is one of `auth_failed`, `budget_exceeded`, `content_filtered`,
-`invalid_request`, `provider_unavailable`, `rate_limited`, `timeout`, `unknown`.
-
-### `list_capabilities`
-
-Takes no arguments. Reports what this installation can do right now: which
-providers are ready and which are waiting on an environment variable, which
-models are reachable through them, what has been spent, and how fresh the curated
-data is. Read-only, costs nothing, and never returns a key
-([ADR 0011](docs/adr/0011-what-list-capabilities-reports.md)).
-
-```json
-{
-  "configured_providers": [
-    {
-      "id": "openrouter",
-      "status": "ready",
-      "models": ["openai/gpt-image-2", "google/gemini-3.1-flash-image", "..."],
-      "models_source": "live"
-    },
-    {
-      "id": "azure",
-      "status": "not_configured",
-      "models": ["gpt-image-2"],
-      "models_source": "curated",
-      "note": "Disabled in configuration."
-    }
-  ],
-  "default_model": "gemini-3.1-flash-image",
-  "use_cases": [
-    "text_in_image",
-    "photoreal",
-    "illustration",
-    "diagram",
-    "fast_bulk"
-  ],
-  "models": [
-    {
-      "id": "gpt-image-2",
-      "display_name": "GPT Image 2",
-      "available": true,
-      "provider": "openrouter",
-      "model_ref": "openai/gpt-image-2",
-      "per_image_usd": 0.19,
-      "max_size": "1536x1024"
-    }
-  ],
-  "budget": {
-    "session_spent_usd": 0.039,
-    "session_limit_usd": 5,
-    "day_spent_usd": 0.039,
-    "day_limit_usd": 10,
-    "day": "2026-08-26",
-    "day_resets_at": "2026-08-26T22:00:00.000Z",
-    "on_exceed": "refuse"
-  },
-  "knowledge_updated": "2026-08-26",
-  "disclaimer": "Scores are editorial judgements informed by public leaderboards and hands-on testing, not measurements. …"
-}
-```
-
-_(Provider and model lists abridged; a real answer lists all four curated models
-and every provider the config names.)_ A `not_configured` provider whose key
-variable is simply unset reports it under `missing`, by name — never by value.
-
-### `recommend_model`
-
-Advice before spending money. Spends nothing, calls no provider, touches the
-ledger not at all. Both arguments are optional.
-
-| Argument      | Type                                                                        |
-| ------------- | --------------------------------------------------------------------------- |
-| `use_case`    | `text_in_image` \| `photoreal` \| `illustration` \| `diagram` \| `fast_bulk` |
-| `budget_hint` | free text, e.g. `"20 images for a deck"`, `"under $1 total"`                 |
-
-A count and a dollar cap are parsed out of `budget_hint` where present, and the
-assumption is stated back in `estimate.assumption` so a wrong parse is visible
-rather than silent.
-
-```json
-{
-  "use_case": "illustration",
-  "budget_hint": "20 images for a deck"
-}
-```
-
-```json
-{
-  "use_case": "illustration",
-  "best_overall": {
-    "model": "gemini-3.1-flash-image",
-    "display_name": "Nano Banana (Gemini 3.1 Flash Image)",
-    "available_to_you": true,
-    "via": ["openrouter", "google"],
-    "price_per_image_usd": 0.039,
-    "why": "Scores 5/5 for illustration, the highest of the curated models. The default workhorse: fast, cheap, and the strongest of the four on illustration and clean diagram-like output — which is exactly what deck and doc images usually are."
-  },
-  "best_configured": {
-    "model": "gemini-3.1-flash-image",
-    "display_name": "Nano Banana (Gemini 3.1 Flash Image)",
-    "via": "openrouter",
-    "price_per_image_usd": 0.039,
-    "why": "use_case=illustration; highest-scoring available model for illustration at the lowest price. The default workhorse: fast, cheap, and the strongest of the four on illustration and clean diagram-like output — which is exactly what deck and doc images usually are."
-  },
-  "cheaper_alternative": {
-    "model": "grok-imagine-image-2.0",
-    "display_name": "Grok Imagine Image 2.0",
-    "via": "openrouter",
-    "price_per_image_usd": 0.02,
-    "trade_off": "Roughly 2x cheaper at $0.02 an image. Scores 4/5 for illustration where Nano Banana (Gemini 3.1 Flash Image) scores 5/5. Do not pick it when the output size is load-bearing: the API takes an aspect ratio plus a resolution and has no size, quality or style parameter, so a requested 1536x1024 is approximated rather than honoured."
-  },
-  "estimate": {
-    "assumed_count": 20,
-    "assumed_budget_usd": null,
-    "assumption": "Read 20 images from budget_hint \"20 images for a deck\"; the estimate is wrong if that is not what you meant.",
-    "recommended_total_usd": 0.78,
-    "cheaper_total_usd": 0.4
-  },
-  "recommended_model": "grok-imagine-image-2.0",
-  "recommendation": "For 20 images the price gap outweighs the quality gap: use Grok Imagine Image 2.0 (grok-imagine-image-2.0) via openrouter — about $0.40 instead of $0.78, a saving of $0.38. Nano Banana (Gemini 3.1 Flash Image) scores 5/5 for illustration against 4/5, so switch back if that difference is what the batch is about.",
-  "note_on_unconfigured": [],
-  "knowledge_updated": "2026-08-26",
-  "disclaimer": "Scores are editorial judgements informed by public leaderboards and hands-on testing, not measurements. …"
-}
-```
-
-The recommendation is willing to name the cheap model. When the best model for a
-use case is out of reach, `note_on_unconfigured` says concretely what would
-unlock it — the variable to set, the switch to flip, or the fact that this build
-has no adapter for that provider at all
-([ADR 0012](docs/adr/0012-what-recommend-model-is-willing-to-say.md)).
-
-## Cost and budgets
-
-Every generation is priced from the provider's own figure when it gives one, and
-from the curated per-image price in `data/models.json` when it does not. The
-OpenRouter adapter reads `usage.cost` off the response, so its numbers are
-authoritative rather than estimated. Each ledger line records which of the two
-it used.
-
-Two limits apply at once, and both default to on:
-
-- `budget.max_usd_per_session` — **$5**, for one server process. Resets when the
-  client restarts the server.
-- `budget.max_usd_per_day` — **$10**, for one local calendar day. Survives
-  restarts, because it is recomputed from the cost log.
-
-Before each call, the estimated cost is checked against both. When either would
-be breached, the tighter one decides, and `budget.on_exceed` says what happens:
-
-- `refuse` (the default) — the call is blocked and `generate_image` answers with
-  `"error": "budget_exceeded"` and a message naming the limit, the spend so far
-  and when it resets. Nothing is charged.
-- `warn` — the call runs and the success envelope carries a `budget_warning`
-  field.
-
-Set either limit to `null` to switch it off. Spend is appended as JSONL to
-`logging.cost_log` (`./imagine-output/costs.jsonl` by default); set it to `null`
-to keep the ledger in memory only, which also means the daily total no longer
-survives a restart. See
-[ADR 0008](docs/adr/0008-cost-ledger-and-budget-enforcement.md).
-
-## Where images land
-
-Images go to `output.dir` (`./imagine-output` by default, or `output_dir` on the
-individual call), named by the `output.filename` template
-`{slug}-{hash}.{ext}`:
-
-- `{slug}` — the prompt, lowercased and hyphenated, cut to 60 characters
-- `{hash}` — the first 8 hex characters of the SHA-256 of the image bytes
-- `{ext}` — from the MIME type the provider reported
-
-Nothing is ever overwritten: a collision appends `-2`, `-3` and so on. The
-template names a file, not a path — a `/` or `\` in it is an error.
-
-Alongside the images, one JSONL line per image is appended to `output.manifest`
-(`./imagine-output/manifest.jsonl` by default), recording path, prompt,
-provider, model, cost, dimensions, MIME type, duration and timestamp. That
-manifest is what the phase 2 gallery will read. Set it to `null` and it falls
-back to `manifest.jsonl` inside the resolved output directory. See
-[ADR 0006](docs/adr/0006-output-writing-naming-and-the-manifest.md).
-
-## Troubleshooting
-
-**"Environment variable OPENROUTER_API_KEY is not set"** — the config names a
-variable that is not in the environment. Put it in the MCP client's `env` block
-or in `~/.imagine/.env`, and remember that MCP clients do not inherit your shell
-profile. `list_capabilities` names exactly which variables it is missing.
-
-**`list_capabilities` shows a provider as `not_configured`** — read its `note`.
-"Disabled in configuration" means `providers.<id>.enabled` is `false`. "No
-adapter for this provider is registered in this build" means the provider is
-planned but not implemented; OpenRouter and Azure OpenAI are the real ones
-today. "The adapter reports itself unconfigured" for Azure means one of the four
-things it needs is missing: `enabled`, `endpoint`, a credential, or at least one
-entry in `deployments`.
-
-**Azure fails with `provider_unavailable` and a 404** — the deployment name in
-`providers.azure.deployments` does not exist on that resource. The message names
-the deployment it tried; check it against the deployment list in Azure AI
-Foundry, and remember it is the *deployment* name, not the model name.
-
-**Azure fails with `auth_failed` mentioning `IDENTITY_ENDPOINT`** —
-`providers.azure.auth` is `entra` but this process has no managed identity, which
-is normal on a developer machine. Switch to `api_key` and set the variable
-`api_key_env` names, or run it somewhere that provides an identity.
-
-**Azure fails with `auth_failed` and a 403 from the resource** — the managed
-identity has no **Cognitive Services OpenAI User** role on the Foundry resource,
-or the assignment has not propagated yet. Assignments are eventually consistent;
-if you just deployed, wait a minute and try again.
-
-**`"error": "invalid_request"` with "No image provider is available"** — nothing
-is both enabled and credentialled. Set `OPENROUTER_API_KEY`, or check that you
-have not disabled `providers.openrouter`.
-
-**`"error": "budget_exceeded"`** — the message names which limit, what has been
-spent and when it resets. Raise `budget.max_usd_per_session` or
-`budget.max_usd_per_day`, set `budget.on_exceed` to `"warn"`, or wait. Nothing
-was charged.
-
-**`"error": "content_filtered"`** — the provider's moderation refused the
-prompt. Rephrase it, or name another provider with `provider_hint`; content
-policies differ. This one is not retryable, and the router deliberately does not
-try a second provider on your behalf.
-
-**Config file changes have no effect** — the server resolves `./config.json`
-against its own working directory, which your MCP client chooses. Use
-`~/.imagine/config.json` instead, and restart the client so the server is
-relaunched. A config file that is malformed or names an unknown key fails
-loudly at startup with the file path and the offending field.
-
-**`npx -y imagine-mcp` says `'imagine' is not recognized`** — you are running it
-from inside a clone of this repo. npm resolves the package name to the local
-project instead of the registry, and a package's own bin is never shimmed into
-its own `node_modules/.bin`. Run it from any other directory, or use
-`node <repo>/dist/index.js` when working inside the clone.
-
-**Images end up somewhere unexpected** — relative paths in `output.dir` resolve
-against the server's working directory, not your project. Use an absolute path,
-or pass `output_dir` on the call. The exact path is always in the tool result.
-
-## Development
-
-```sh
-npm install     # install dependencies
-npm run build   # bundle src/index.ts to dist/ with tsup
-npm test        # build, then run the vitest suite
-npm run lint    # eslint
-npm run format  # prettier --write
-```
-
-`npm run typecheck` runs `tsc --noEmit` over `src` and `test`. CI runs lint,
-format check, typecheck and tests on every push to `main` and every pull
-request.
-
-To run the local build as a server, point your MCP client at
-`node <repo>/dist/index.js`, or `npm link` the package and use `imagine`.
-
-### Layout
-
-| Path             | What lives there                                |
-| ---------------- | ----------------------------------------------- |
-| `src/index.ts`   | binary entry point: picks stdio or HTTP         |
-| `src/transport/` | the HTTP listener, routing and origin checks    |
-| `src/mcp/`       | MCP protocol wiring and tool definitions        |
-| `src/core/`      | router, config, knowledge, budget, output       |
-| `src/providers/` | one adapter per image provider                  |
-| `data/`          | curated model knowledge (`models.json`)         |
-| `schema/`        | JSON Schema for the user config file            |
-| `deploy/`        | the container entrypoint (see `Containerfile`)  |
-| `test/`          | `unit/`, `contract/`, `live/` and `e2e/` suites |
-
-## Curated model knowledge
+One thing to know before you share it: the app registration is **single-tenant**
+(`AzureADMyOrg`), so a colleague in another tenant is not a permissions problem
+you can fix from the portal — it is a second `azd env` and a second `azd up` in
+that tenant.
+
+The long version — tenant permissions, the manual app registration for when you
+cannot create one, every verification step, and tearing it all down — is
+[docs/deploy/azure-wizard.md](docs/deploy/azure-wizard.md). Running the HTTP
+server yourself, in a container or anywhere else, is
+[docs/hosting.md](docs/hosting.md).
+
+## It keeps up with the leaderboards so you don't have to
+
+The best image model changes every few weeks, and "best" depends on the job:
+the model that renders legible text inside a picture is not the one that does
+photorealism, and neither is the cheap one you want for twenty thumbnails. Most
+integrations freeze one choice in code and quietly go stale. `imagine` keeps that
+knowledge as **data** instead, and gives you advice from it before you spend
+anything.
+
+Ask your assistant *"I need twenty illustrations for a deck, what should we
+use?"* and `recommend_model` answers with the best model overall, the best one
+**you can actually reach** with your keys, a cheaper alternative and its trade-off
+in plain words, and what each option would cost for twenty images. It will
+happily recommend the cheap model when the cheap model is fine — an adviser that
+always picks the premium option is one you stop trusting after the second bill.
+When the best model for the job is one you have not configured, it says so and
+tells you exactly what enabling it would take.
+
+Behind that sits [`data/models.json`](data/models.json): per model a score per
+use case, an indicative price, a leaderboard rank band and — importantly — a
+`checked` date on every price and ranking, so you can always see how fresh the
+advice is. Today that file is curated by hand and shipped with each release; a
+weekly refresh that proposes updates as a pull request is planned
+([#25](https://github.com/hoeloe15/imagine/issues/25),
+[#26](https://github.com/hoeloe15/imagine/issues/26)), so the knowledge moves
+with the leaderboards without anyone hard-coding a model name again.
+
+## How it decides
 
 [`data/models.json`](data/models.json) is the editorial half of the project: for
 each curated model, a 1–5 score per use case, an indicative price per image, a
 typical latency, which providers can serve it, and a `notes` field that says both
 what to pick it for and what *not* to pick it for. Four models are curated today
 — GPT Image 2, Nano Banana (Gemini 3.1 Flash Image), Grok Imagine Image 2.0 and
-FLUX 2 Pro.
+FLUX 2 Pro. The scores are editorial judgements, not measurements, and the prices
+are indicative list prices that change often; both advisory tools return the
+file's own disclaimer alongside their answer, a provider's reported cost always
+beats the number in the file, and the file carries an `updated` date so
+staleness is visible ([ADR 0005](docs/adr/0005-two-schemas-for-curated-model-knowledge.md)).
 
-The scores are editorial judgements, not measurements, and the prices are
-indicative list prices that change often; both tools return the file's own
-disclaimer alongside their answer, and a provider's reported cost always beats
-the number in the file. The file carries an `updated` date so staleness is
-visible. See [ADR 0005](docs/adr/0005-two-schemas-for-curated-model-knowledge.md).
+On top of that sit two budgets that are on by default: **$5 per server session**
+and **$10 per day**, and by default a call that would breach either is refused
+rather than run. Every image is logged — path, prompt, model, cost — so the
+spend is a receipt you can read, not a surprise on a bill. Both are configurable
+([budgets and the cost ledger](docs/configuration.md#cost-and-budgets)).
 
-## Planned features
+## What is not there yet
 
-- The Google Gemini and xAI Grok adapters
-- A local web portal for key management and a searchable gallery of everything
-  generated, reading the manifest
-- A pre-registered OAuth client for claude.ai and Claude Desktop, so a custom
-  connector needs no hand-made second app registration
+- **Only the OpenRouter and Azure OpenAI adapters exist.** The config vocabulary
+  also covers Google and xAI, and `data/models.json` records their availability,
+  but no adapter is registered for them, so enabling one only makes
+  `list_capabilities` say "no adapter for this provider is registered in this
+  build".
+- **Azure Entra authentication needs a managed identity to run under.** With
+  `"auth": "entra"` the server gets its token from the identity the platform
+  provides (Container Apps, App Service). On a developer machine there is none,
+  and a call fails with an `auth_failed` saying so; use `"auth": "api_key"`
+  locally.
+- `logging.level` is accepted by the config schema but nothing reads it yet.
+- No web portal and no gallery yet, and no pre-registered OAuth client for
+  claude.ai and Claude Desktop — so a custom connector still needs a hand-made
+  second app registration. See [PLAN.md](PLAN.md) for the full architecture and
+  phasing.
+
+## Something not working?
+
+Most of it comes down to three things: a key the server can't see, a config file
+in a directory you didn't expect, or an Azure deployment name that isn't the
+model name. [docs/troubleshooting.md](docs/troubleshooting.md) has the symptom,
+the cause and the fix for each of those, and for every error code the tools can
+return.
+
+## Development
+
+```sh
+git clone https://github.com/hoeloe15/imagine.git
+cd imagine
+npm install
+npm run build
+npm test
+```
+
+More — the repo layout, the lint and format commands, and how to point a client
+at your local build — is in [docs/development.md](docs/development.md).
 
 ## Documentation
 
+- [docs/tools.md](docs/tools.md) — the three tools in full
+- [docs/configuration.md](docs/configuration.md) — config, keys, budgets, output
+- [docs/hosting.md](docs/hosting.md) — HTTP, authentication, containers
+- [docs/deploy/azure-wizard.md](docs/deploy/azure-wizard.md) — the Azure runbook
+- [docs/troubleshooting.md](docs/troubleshooting.md) — when it misbehaves
+- [docs/development.md](docs/development.md) — working on imagine itself
+- [docs/demo.md](docs/demo.md) — a real deck, images generated in-flight
 - [PLAN.md](PLAN.md) — the design
 - [docs/adr/](docs/adr/) — the decisions, and why they went that way
 - [docs/research/providers-2026-08.md](docs/research/providers-2026-08.md) — provider API research
