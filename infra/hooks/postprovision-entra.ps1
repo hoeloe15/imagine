@@ -96,33 +96,48 @@ $api = @{
             userConsentDescription  = 'Allows the app to generate images through imagine on your behalf.'
         }
     )
-    preAuthorizedApplications   = @(
-        @{
-            appId                  = $VSCodeClientId
-            delegatedPermissionIds = @($scopeId)
-        }
-    )
 }
 
-$patch = @{
+# Graph refuses to pre-authorise a scope in the same request that creates it,
+# and `az rest` reports failure through $LASTEXITCODE rather than an exception.
+# So: two PATCHes, each checked by exit code.
+function Invoke-GraphPatch([hashtable] $Body, [string] $What) {
+    $patchFile = New-TemporaryFile
+    try {
+        Set-Content -Path $patchFile -Value ($Body | ConvertTo-Json -Depth 10 -Compress) -Encoding utf8
+        az rest --method PATCH `
+            --uri "https://graph.microsoft.com/v1.0/applications/$objectId" `
+            --headers 'Content-Type=application/json' `
+            --body "@$patchFile" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Graph PATCH failed (exit $LASTEXITCODE)" }
+        Write-Host "$What: done"
+        return $true
+    } catch {
+        Write-Warning "Could not update the app registration ($What): $($_.Exception.Message)"
+        return $false
+    } finally {
+        Remove-Item $patchFile -ErrorAction SilentlyContinue
+    }
+}
+
+$scopePatched = Invoke-GraphPatch -What 'Identifier URIs and access_as_user scope' -Body @{
     identifierUris = $identifierUris
     api            = $api
-} | ConvertTo-Json -Depth 10 -Compress
-
-$patchFile = New-TemporaryFile
-Set-Content -Path $patchFile -Value $patch -Encoding utf8
-
-try {
-    az rest --method PATCH `
-        --uri "https://graph.microsoft.com/v1.0/applications/$objectId" `
-        --headers 'Content-Type=application/json' `
-        --body "@$patchFile" | Out-Null
+}
+if ($scopePatched) {
     Write-Host "Application ID URIs now: $($identifierUris -join ', ')"
-} catch {
-    Write-Warning "Could not update the app registration: $($_.Exception.Message)"
+    Invoke-GraphPatch -What 'Pre-authorising VS Code' -Body @{
+        api = @{
+            preAuthorizedApplications = @(
+                @{
+                    appId                  = $VSCodeClientId
+                    delegatedPermissionIds = @($scopeId)
+                }
+            )
+        }
+    } | Out-Null
+} else {
     Write-Warning "Add these Application ID URIs by hand under Expose an API: $($identifierUris -join ', ')"
-} finally {
-    Remove-Item $patchFile -ErrorAction SilentlyContinue
 }
 
 # A service principal in this tenant is what makes the app assignable and
