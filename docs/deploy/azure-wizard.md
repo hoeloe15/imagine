@@ -605,6 +605,20 @@ not registered as an Application ID URI on the app registration. Add it under
 **Expose an API → Application ID URI**, exactly, including the `/mcp` path and
 with no trailing slash. See §6c.
 
+Two more failures seen on the first real run, both fixed in the template but
+worth recognising:
+
+- `AADSTS65001` / `consent_required` when acquiring the token with the Azure
+  CLI: the CLI's own app is not pre-authorised on the `access_as_user` scope.
+  The hook now pre-authorises it (and VS Code); on a hand-registered app, add
+  both under **Expose an API → Authorized client applications**.
+- `401` with `error_description="The token was minted for another resource"`
+  although the token was requested for `api://<client-id>/access_as_user`:
+  Entra v2 access tokens carry the **bare client id** as `aud`, whatever
+  identifier URI the scope was requested through. The template therefore lists
+  the bare id as an accepted audience next to the URL and `api://` forms; a
+  hand-set `IMAGINE_AUTH_AUDIENCE` must include it too.
+
 **7d. It refuses what it should refuse.** The rejection paths are unit-tested
 with locally minted keys, but only a live tenant proves the deployed
 configuration. Three tokens, all of which must fail:
