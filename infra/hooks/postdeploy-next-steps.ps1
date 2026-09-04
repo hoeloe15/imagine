@@ -133,7 +133,8 @@ if ($foundryResourceId) {
 } else {
     Write-Host '  Azure OpenAI: not configured. Optional. Keyless is the recommended'
     Write-Host '  shape - the container identity gets the token, no key exists:'
-    Write-Host '      azd env set IMAGINE_CONFIG_JSON ''{"providers":{"azure":{"enabled":true,"auth":"entra","endpoint":"https://<resource>.openai.azure.com","deployments":{"gpt-image-2":"<deployment>"}}}}'''
+    Write-Host '      $config = ''{"providers":{"azure":{"enabled":true,"auth":"entra","endpoint":"https://<resource>.openai.azure.com","deployments":{"gpt-image-2":"<deployment>"}}}}'''
+    Write-Host '      azd env set IMAGINE_CONFIG_JSON ($config -replace ''"'', ''\"'')   # quotes must be escaped: the value is spliced into main.parameters.json'
     Write-Host '      azd env set IMAGINE_FOUNDRY_RESOURCE_ID "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>"'
     Write-Host '      azd up'
 }

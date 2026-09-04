@@ -383,8 +383,14 @@ managed identity gets the token.
 
 ```powershell
 $config = '{"providers":{"azure":{"enabled":true,"auth":"entra","endpoint":"https://<your-resource>.openai.azure.com","deployments":{"gpt-image-2":"<your-deployment-name>"}}}}'
-azd env set IMAGINE_CONFIG_JSON $config
+azd env set IMAGINE_CONFIG_JSON ($config -replace '"', '\"')
 ```
+
+The `-replace` is not optional: azd splices the value verbatim into
+`main.parameters.json`, so unescaped quotes break that file and `azd up` fails
+with `error unmarshalling Bicep template parameters` before anything is
+deployed. The escaped form arrives in the container as plain JSON. (Learned on
+the first real run, 2026-09-04.)
 
 `deployments` maps a curated model id to the name **you** gave the deployment in
 Azure AI Foundry. They are usually not the same string, and a mismatch surfaces
@@ -997,10 +1003,9 @@ Not exercised on 2026-09-03, and still a guess until someone runs it.
       `IMAGINE_*_SECRET_IN_VAULT` flow, and whether the Key Vault reference is
       really picked up by a plain revision restart after
       `az keyvault secret set`, with no redeploy.
-- [ ] The whole of §6b: managed-identity Azure OpenAI end to end. Including
-      whether `azd env set IMAGINE_CONFIG_JSON '<json>'` survives the round trip
-      through the azd env file and `main.parameters.json` substitution with its
-      quotes intact.
+- [ ] The whole of §6b: managed-identity Azure OpenAI end to end. (The
+      `IMAGINE_CONFIG_JSON` round trip is answered: it does **not** survive with
+      raw quotes — escape them as §6b now shows. Verified 2026-09-04.)
 - [ ] Whether `resource=https://ai.azure.com` is the resource the Foundry data
       plane actually accepts, as opposed to
       `https://cognitiveservices.azure.com` (the `AZURE_ENTRA_SCOPE` question).
