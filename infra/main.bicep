@@ -61,6 +61,9 @@ param imagineConfigJson string = ''
 ])
 param outputSink string = 'local'
 
+@description('Lifetime in hours of the renderable image links (1-168). Empty keeps the server default.')
+param outputBlobUrlTtlHours string = ''
+
 @description('Resource id of the Azure AI Foundry / Azure OpenAI account to grant the container identity Cognitive Services OpenAI User on. It may live in another resource group or subscription. Empty skips the role assignment.')
 param foundryResourceId string = ''
 
@@ -98,6 +101,7 @@ module resources 'resources.bicep' = {
     imagineConfigJson: imagineConfigJson
     foundryResourceId: foundryResourceId
     outputSink: outputSink
+    outputBlobUrlTtlHours: outputBlobUrlTtlHours
   }
 }
 

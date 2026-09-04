@@ -55,6 +55,9 @@
     },
     "outputSink": {
       "value": "${IMAGINE_OUTPUT_SINK=local}"
+    },
+    "outputBlobUrlTtlHours": {
+      "value": "${IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS=}"
     }
   }
 }

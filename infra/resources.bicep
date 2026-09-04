@@ -30,6 +30,9 @@ param foundryResourceId string = ''
 ])
 param outputSink string = 'local'
 
+@description('Lifetime in hours of the renderable image links (1-168). Empty keeps the server default.')
+param outputBlobUrlTtlHours string = ''
+
 @description('Port the container listens on. The entrypoint resolves IMAGINE_HTTP_PORT, then PORT, then 8080 (ADR 0018).')
 param targetPort int = 8080
 
@@ -355,20 +358,30 @@ var providerEnv = concat(
 // IMAGINE_CONFIG_JSON. An output section in IMAGINE_CONFIG_JSON still wins
 // (ADR 0024).
 var blobSinkEnv = blobSinkEnabled
-  ? [
-      {
-        name: 'IMAGINE_OUTPUT_SINK'
-        value: 'blob'
-      }
-      {
-        name: 'IMAGINE_OUTPUT_BLOB_ACCOUNT_URL'
-        value: storage!.properties.primaryEndpoints.blob
-      }
-      {
-        name: 'IMAGINE_OUTPUT_BLOB_CONTAINER'
-        value: outputContainerName
-      }
-    ]
+  ? concat(
+      [
+        {
+          name: 'IMAGINE_OUTPUT_SINK'
+          value: 'blob'
+        }
+        {
+          name: 'IMAGINE_OUTPUT_BLOB_ACCOUNT_URL'
+          value: storage!.properties.primaryEndpoints.blob
+        }
+        {
+          name: 'IMAGINE_OUTPUT_BLOB_CONTAINER'
+          value: outputContainerName
+        }
+      ],
+      empty(outputBlobUrlTtlHours)
+        ? []
+        : [
+            {
+              name: 'IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS'
+              value: outputBlobUrlTtlHours
+            }
+          ]
+    )
   : []
 
 var containerEnv = concat(
