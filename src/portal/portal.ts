@@ -528,10 +528,14 @@ export function createPortal(options: PortalOptions): PathHandler {
    */
   function sameSite(req: IncomingMessage): boolean {
     const site = header(req, "sec-fetch-site");
-    const origin = header(req, "origin");
+    // Chromium sends the literal string "null" as Origin on a same-origin form
+    // post when the page carries a strict referrer policy; that is not a
+    // foreign origin, it is an absent one.
+    const rawOrigin = header(req, "origin");
+    const origin = rawOrigin === "null" ? undefined : rawOrigin;
     const host = header(req, "host");
 
-    if (site === "cross-site") return refuseSite(site, origin, host);
+    if (site === "cross-site") return refuseSite(site, rawOrigin, host);
 
     const acceptable = new Set([new URL(settings.baseUrl).origin]);
     if (host !== undefined) {
@@ -757,7 +761,9 @@ export function createPortal(options: PortalOptions): PathHandler {
     res.setHeader("cache-control", "no-store");
     res.setHeader("content-security-policy", CONTENT_SECURITY_POLICY);
     res.setHeader("x-content-type-options", "nosniff");
-    res.setHeader("referrer-policy", "no-referrer");
+    // `same-origin` keeps the referrer inside this site and, unlike
+    // `no-referrer`, leaves Chromium's Origin header intact on form posts.
+    res.setHeader("referrer-policy", "same-origin");
     if (isHttps(req)) {
       res.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
     }
