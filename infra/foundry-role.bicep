@@ -12,6 +12,12 @@ param principalId string
 @description('Role definition GUID to assign. Verified against the live tenant, not guessed.')
 param roleDefinitionId string
 
+// MAI-Image deployments (dialect "mai", ADR 0027) are served by the Foundry
+// data plane, which checks Cognitive Services User rather than the OpenAI
+// role. Verified live on 2026-09-04:
+//   az role definition list --name "Cognitive Services User" --query "[].name" -o tsv
+var cognitiveServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+
 resource account 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
   name: accountName
 }
@@ -21,6 +27,16 @@ resource assignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: account
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleDefinitionId)
+    principalId: principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource maiAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(account.id, principalId, cognitiveServicesUserRoleId)
+  scope: account
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleId)
     principalId: principalId
     principalType: 'ServicePrincipal'
   }
