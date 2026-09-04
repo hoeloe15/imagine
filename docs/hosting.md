@@ -255,3 +255,49 @@ tells a Claude client which tenant to log in against.
 
 The reasoning is in [ADR 0020](adr/0020-the-azd-template.md) and
 [ADR 0022](adr/0022-hosted-config-and-managed-identity.md).
+
+## Where the pictures go
+
+Over stdio on your laptop, `generate_image` writes a file and hands your
+assistant the path. That is exactly right there, and exactly wrong in the cloud:
+the path names a directory inside a container nobody can reach, on a disk that is
+wiped on the next deploy. A chat client given that path shows a broken image.
+
+So a hosted deployment can put the images in Blob Storage instead. The tool
+result then carries a `url` next to `path` — a link that opens in a browser and
+renders in a chat client, with no Azure sign-in.
+
+```powershell
+azd env set IMAGINE_OUTPUT_SINK blob
+azd up
+```
+
+That adds a storage account and one container to your resource group, and gives
+the container app's identity the two roles it needs. **No key or connection
+string exists**: shared-key access on the account is switched off, so the
+identity is the only way in, and the container is not publicly readable. The
+link the tool returns is signed for that one image and expires after an hour —
+`output.blob.url_ttl_hours` changes that, up to a week. Anyone you show a link to
+can see that one picture until it expires; nobody can see anything else.
+
+Switching back is `azd env set IMAGINE_OUTPUT_SINK local` and another `azd up`,
+which removes the storage account and the images in it.
+
+Two things worth knowing. The first image after the deployment that turns this
+on can fail with a `403` and then work a minute later — that is Entra
+replicating the new role assignment, not a broken deployment. And the manifest
+and the cost log are still written to the container's own disk, so they do not
+survive a revision; moving them is
+[#45](https://github.com/hoeloe15/imagine/issues/45).
+
+The account URL and container name reach the server as
+`IMAGINE_OUTPUT_BLOB_ACCOUNT_URL` and `IMAGINE_OUTPUT_BLOB_CONTAINER`, which the
+template fills in because they only exist once the storage account does. An
+`output` section in
+[`IMAGINE_CONFIG_JSON`](configuration.md#imagine_config_json-for-hosts-with-no-config-file)
+overrides them.
+
+The full reasoning, including why the link is a short-lived signed URL rather
+than a public container, is in
+[ADR 0024](adr/0024-output-sinks-and-renderable-urls.md); turning it on step by
+step is section 6f of the [operator runbook](deploy/azure-wizard.md).

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createBlobSink } from "../../src/core/blob-sink.js";
 import { CostLedger } from "../../src/core/budget.js";
 import { DEFAULT_CONFIG, type Config } from "../../src/core/config-schema.js";
 import { parseModelKnowledge, type ModelKnowledge } from "../../src/core/knowledge.js";
@@ -302,5 +303,80 @@ describe("the generate_image tool", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("Input validation error");
     await expect(readdir(directory)).resolves.toEqual([]);
+  });
+});
+
+describe("the blob sink, end to end", () => {
+  const ACCOUNT_URL = "https://mystorage.blob.core.windows.net";
+
+  const keyXml = [
+    "<UserDelegationKey>",
+    "<SignedOid>11111111-1111-1111-1111-111111111111</SignedOid>",
+    "<SignedTid>22222222-2222-2222-2222-222222222222</SignedTid>",
+    "<SignedStart>2026-09-04T11:55:00Z</SignedStart>",
+    "<SignedExpiry>2026-09-05T12:00:00Z</SignedExpiry>",
+    "<SignedService>b</SignedService>",
+    "<SignedVersion>2020-12-06</SignedVersion>",
+    "<Value>aW1hZ2luZS10ZXN0LWRlbGVnYXRpb24ta2V5</Value>",
+    "</UserDelegationKey>",
+  ].join("");
+
+  function blobDependencies(): ServerDependencies {
+    const fetchImpl = (input: string | URL) =>
+      Promise.resolve(
+        String(input).includes("comp=userdelegationkey")
+          ? new Response(keyXml, { status: 200 })
+          : new Response(null, { status: 201 }),
+      );
+
+    return dependencies({
+      sink: createBlobSink({
+        accountUrl: ACCOUNT_URL,
+        container: "images",
+        urlTtlHours: 1,
+        getAccessToken: () => Promise.resolve("token-value"),
+        fetch: fetchImpl as unknown as typeof globalThis.fetch,
+      }),
+    });
+  }
+
+  it("returns the blob URL as path and a renderable link as url", async () => {
+    const result = await callGenerateImage(blobDependencies(), {
+      prompt: "A lighthouse at dusk",
+    });
+
+    const body = payload(result);
+    expect(result.isError).toBeFalsy();
+    expect(body["path"]).toMatch(
+      /^https:\/\/mystorage\.blob\.core\.windows\.net\/images\/a-lighthouse-at-dusk-[0-9a-f]{8}\.png$/,
+    );
+    expect(String(body["url"])).toContain("sig=");
+    expect(String(body["url"])).toContain("&sr=b");
+    expect(result.structuredContent?.["url"]).toBe(body["url"]);
+  });
+
+  it("still never sends the bytes back", async () => {
+    const result = await callGenerateImage(blobDependencies(), {
+      prompt: "A lighthouse at dusk",
+    });
+
+    expect(JSON.stringify(result)).not.toContain(ONE_PIXEL_PNG_BASE64);
+  });
+
+  it("records the link in the manifest next to the blob path", async () => {
+    await callGenerateImage(blobDependencies(), { prompt: "A lighthouse at dusk" });
+
+    const manifest = await readFile(join(directory, "manifest.jsonl"), "utf8");
+    const record = JSON.parse(manifest.trim()) as Record<string, unknown>;
+    expect(String(record["path"])).toContain(`${ACCOUNT_URL}/images/`);
+    expect(String(record["url"])).toContain("sig=");
+  });
+
+  it("leaves local mode with no url at all", async () => {
+    const result = await callGenerateImage(dependencies(), {
+      prompt: "A lighthouse at dusk",
+    });
+
+    expect(payload(result)["url"]).toBeUndefined();
   });
 });

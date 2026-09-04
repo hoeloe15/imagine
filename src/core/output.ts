@@ -1,10 +1,10 @@
 /**
- * The only place in the codebase that turns image bytes into a file.
+ * The only place in the codebase that turns image bytes into a stored image.
  *
- * Everything about where an image lands — directory resolution, naming,
- * collision handling, the manifest the phase 2 gallery reads — lives here, so
- * it behaves identically no matter which adapter produced the bytes. See
- * ADR 0003 and ADR 0006.
+ * Everything about where an image lands — naming, collision handling, the
+ * manifest the phase 2 gallery reads — lives here, so it behaves identically no
+ * matter which adapter produced the bytes and no matter which sink stores them.
+ * See ADR 0003, ADR 0006 and ADR 0024.
  */
 
 import { createHash } from "node:crypto";
@@ -22,9 +22,31 @@ export interface OutputConfig {
   manifest?: string;
 }
 
+/**
+ * Where one image ended up. `url` is present only when the sink can hand out a
+ * link a client may fetch without credentials of its own.
+ */
+export interface StoredImage {
+  path: string;
+  url?: string;
+}
+
+/**
+ * A place bytes can be put under a name. The local filesystem is the default
+ * one and lives in this file; Blob Storage is `core/blob-sink.ts`.
+ *
+ * A sink is handed a filename that is already slugged, hashed and validated,
+ * and is expected to honour the never-overwrite rule the same way the local
+ * writer does. See ADR 0024.
+ */
+export interface ObjectSink {
+  put(filename: string, bytes: Uint8Array, mimeType: string): Promise<StoredImage>;
+}
+
 /** One line of the JSONL manifest. */
 export interface ManifestRecord {
   path: string;
+  url?: string;
   prompt: string;
   provider: string;
   model: string;
@@ -36,8 +58,7 @@ export interface ManifestRecord {
   created_at: string;
 }
 
-export interface WrittenImage {
-  path: string;
+export interface WrittenImage extends StoredImage {
   manifest_path: string;
 }
 
@@ -46,7 +67,8 @@ export const DEFAULT_MANIFEST_NAME = "manifest.jsonl";
 
 const SLUG_MAX_LENGTH = 60;
 const HASH_LENGTH = 8;
-const MAX_COLLISION_ATTEMPTS = 1000;
+/** Shared with every sink, so "never overwrite" means one thing everywhere. */
+export const MAX_COLLISION_ATTEMPTS = 1000;
 const TEMPLATE_KEYS = ["slug", "hash", "ext"] as const;
 
 const EXTENSION_BY_SUBTYPE: Readonly<Record<string, string>> = {
@@ -134,6 +156,13 @@ function splitFilename(filename: string): { stem: string; suffix: string } {
   return { stem: filename.slice(0, dot), suffix: filename.slice(dot) };
 }
 
+/** `name.png`, then `name-2.png`, `name-3.png`, … for `attempt` 1, 2, 3, …. */
+export function candidateName(filename: string, attempt: number): string {
+  if (attempt === 1) return filename;
+  const { stem, suffix } = splitFilename(filename);
+  return `${stem}-${attempt}${suffix}`;
+}
+
 function resolvePath(value: string, source: string): string {
   if (value.trim() === "") {
     throw new ImagineError("invalid_request", `${source} is empty; it must be a path.`);
@@ -176,13 +205,8 @@ async function writeWithoutOverwriting(
   filename: string,
   bytes: Uint8Array,
 ): Promise<string> {
-  const { stem, suffix } = splitFilename(filename);
-
   for (let attempt = 1; attempt <= MAX_COLLISION_ATTEMPTS; attempt += 1) {
-    const candidate = path.join(
-      dir,
-      attempt === 1 ? filename : `${stem}-${attempt}${suffix}`,
-    );
+    const candidate = path.join(dir, candidateName(filename, attempt));
     try {
       const handle = await open(candidate, "wx");
       try {
@@ -225,13 +249,18 @@ async function appendManifest(
 }
 
 /**
- * Writes `result.bytes` into the requested directory and appends one manifest
- * line describing it. Never overwrites an existing file.
+ * Stores `result.bytes` and appends one manifest line describing where they
+ * went. Never overwrites. With no `sink` the bytes go to the local filesystem,
+ * which is the whole of local mode and the pre-ADR-0024 behaviour.
+ *
+ * The manifest is written locally either way: it is a file, not an image, and
+ * moving it is #45's job (ADR 0024).
  */
 export async function writeImage(
   request: NormalisedRequest,
   result: NormalisedResult,
   config: OutputConfig,
+  sink?: ObjectSink,
 ): Promise<WrittenImage> {
   const dirSource =
     request.output_dir === undefined ? "the configured output.dir" : "output_dir";
@@ -243,8 +272,13 @@ export async function writeImage(
     ext: extensionFromMimeType(result.mime_type),
   });
 
-  await ensureDirectory(dir, dirSource);
-  const written = await writeWithoutOverwriting(dir, filename, result.bytes);
+  let written: StoredImage;
+  if (sink === undefined) {
+    await ensureDirectory(dir, dirSource);
+    written = { path: await writeWithoutOverwriting(dir, filename, result.bytes) };
+  } else {
+    written = await sink.put(filename, result.bytes, result.mime_type);
+  }
 
   const manifestPath =
     config.manifest === undefined
@@ -252,7 +286,8 @@ export async function writeImage(
       : resolvePath(config.manifest, "the configured output.manifest");
 
   await appendManifest(manifestPath, {
-    path: written,
+    path: written.path,
+    ...(written.url === undefined ? {} : { url: written.url }),
     prompt: request.prompt,
     provider: result.provider,
     model: result.model,
@@ -264,5 +299,5 @@ export async function writeImage(
     created_at: new Date().toISOString(),
   });
 
-  return { path: written, manifest_path: manifestPath };
+  return { ...written, manifest_path: manifestPath };
 }

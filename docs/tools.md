@@ -5,7 +5,7 @@ MCP. For a one-paragraph tour, see the [README](../README.md).
 
 ## `generate_image`
 
-Generates one image, writes it to disk and returns the path plus what it cost.
+Generates one image, stores it and returns where it went plus what it cost.
 The bytes never travel back to the client
 ([why](adr/0010-mcp-server-and-the-generate-image-tool.md)).
 
@@ -64,6 +64,30 @@ calling model can read it and act:
 
 `error` is one of `auth_failed`, `budget_exceeded`, `content_filtered`,
 `invalid_request`, `provider_unavailable`, `rate_limited`, `timeout`, `unknown`.
+
+### `path` and `url`
+
+| Field  | Local (`output.sink: "local"`) | Cloud (`output.sink: "blob"`)               |
+| ------ | ------------------------------ | ------------------------------------------- |
+| `path` | the file that was written      | the blob's own URL, without any access token |
+| `url`  | absent                         | a link that opens without credentials        |
+
+`url` appears only when the server stores images somewhere it can hand out a
+link. It is a short-lived signed URL — one hour by default, `output.blob.
+url_ttl_hours` to change it — scoped to that one image, so it is safe to show
+and it stops working on its own. Render it, or download it if you need the
+pixels; the bytes are still never in the result itself
+([ADR 0024](adr/0024-output-sinks-and-renderable-urls.md)).
+
+```json
+{
+  "path": "https://stabc123.blob.core.windows.net/images/a-lighthouse-at-dusk-7f3ac91d.png",
+  "url": "https://stabc123.blob.core.windows.net/images/a-lighthouse-at-dusk-7f3ac91d.png?sp=r&st=...&sig=...",
+  "provider": "azure",
+  "model": "gpt-image-2",
+  "cost_usd": 0.04
+}
+```
 
 ## `list_capabilities`
 

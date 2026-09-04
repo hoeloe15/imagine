@@ -731,6 +731,113 @@ connected.
 
 ---
 
+## 6f. Make the images visible: turn on the blob sink
+
+**Symptom this fixes.** A chat client asks for a picture, everything succeeds,
+and the client shows a broken image. Look at the tool result and you will see
+something like `"path": "/app/imagine-output/a-lighthouse-7f3ac91d.png"`. That
+is a directory inside the container. The client cannot open it, and the next
+deploy erases it anyway.
+
+The fix is to store the images in Blob Storage and hand back a link.
+
+### Turn it on
+
+```powershell
+azd env set IMAGINE_OUTPUT_SINK blob
+azd up
+```
+
+That provisions, in your existing resource group:
+
+- a StorageV2 account, `st<token>` — HTTPS only, TLS 1.2 minimum, public blob
+  access **off**, shared key access **off**;
+- one blob container, `images`;
+- **Storage Blob Data Contributor** for the container app's identity, scoped to
+  that container, so it can write;
+- **Storage Blob Delegator** for the same identity, scoped to the storage
+  account, so it can sign a read link. (Account scope is not a mistake — the
+  key-signing action does not exist at container scope.)
+
+Nothing else changes. No key and no connection string is created; the identity
+is the only way in.
+
+### What the server does with it
+
+`azd up` sets three environment variables on the container app —
+`IMAGINE_OUTPUT_SINK`, `IMAGINE_OUTPUT_BLOB_ACCOUNT_URL` and
+`IMAGINE_OUTPUT_BLOB_CONTAINER` — so there is nothing to paste by hand. Every
+`generate_image` result now carries a `url` next to `path`: a signed link to
+that one image, valid for an hour, that opens without any Azure sign-in.
+
+To make links live longer, up to a week:
+
+```powershell
+azd env set IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS 8
+azd up
+```
+
+If you would rather control it from your config fragment, an `output` section in
+`IMAGINE_CONFIG_JSON` wins over all three variables.
+
+### Verify it
+
+The real verification is the one that failed before: **generate an image from a
+chat client and look at it.**
+
+In Mistral Le Chat, claude.ai or Claude Code, connected as in section 8, ask for
+a picture. You should see the image itself, not a placeholder. Then check the
+result envelope: `path` should be an `https://st….blob.core.windows.net/images/…`
+URL, and `url` the same thing with `?sp=r&…&sig=…` after it.
+
+From the shell, the same thing without a client:
+
+```powershell
+azd env get-value MCP_OUTPUT_BLOB_URL
+# https://st....blob.core.windows.net/images
+
+az storage blob list --account-name (azd env get-value AZURE_STORAGE_ACCOUNT_NAME) `
+  --container-name images --auth-mode login --query "[].name" -o tsv
+
+# The link handed back really does need no credentials - paste it and expect 200:
+curl.exe -s -o NUL -w "%{http_code}`n" "<the url from the tool result>"
+
+# And the blob really is not public - the same URL without the query string:
+curl.exe -s -o NUL -w "%{http_code}`n" "<the path from the tool result>"
+```
+
+The first `curl` must print `200`, the second `404` — Azure hides a blob it will
+not serve rather than admitting it exists.
+
+> **A first 403 is not a broken deployment.** The role assignments are made in
+> the same deployment as they are used, and Entra replicates them at its own
+> pace. If the first image after this `azd up` comes back
+> `auth_failed … status 403`, wait a minute and ask again. Same caveat as the
+> Foundry role in section 6b.
+
+### Switching back, and what it costs
+
+```powershell
+azd env set IMAGINE_OUTPUT_SINK local
+azd up
+```
+
+The storage account and every image in it are removed. `azd down` removes them
+too.
+
+At this volume, storage is cents per month. There is no lifecycle rule, so
+images accumulate until you delete them — as does the fact that the manifest and
+the cost log are still on the container's ephemeral disk. Both are
+[#45](https://github.com/hoeloe15/imagine/issues/45).
+
+> **Not yet executed live.** As of 2026-09-04 the blob sink has not been run
+> against a real storage account. `az bicep build` passes, the upload and the
+> link signing are covered by unit tests with an injected `fetch`, and the
+> string-to-sign is pinned against the format Microsoft documents for service
+> version `2020-12-06`. The first real run is the test of that.
+
+---
+
 ## 7. Verify the deployed endpoint
 
 Three checks, in order. Do not skip to the client until all three pass — the

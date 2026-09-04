@@ -140,6 +140,22 @@ if ($foundryResourceId) {
 }
 
 Write-Host ''
+
+$blobContainerUrl = Get-AzdValue 'MCP_OUTPUT_BLOB_URL'
+if ($blobContainerUrl) {
+    Write-Host '  Images: stored in Blob Storage. Every generate_image result carries a'
+    Write-Host '  url alongside path - a link that expires, which a chat client can render.'
+    Write-Host "      $blobContainerUrl"
+} else {
+    Write-Host '  Images: written to the container filesystem, which no chat client can'
+    Write-Host '  reach and which is emptied on every revision. Over stdio that is right;'
+    Write-Host '  hosted it means a broken image. Switch to Blob Storage:'
+    Write-Host '      azd env set IMAGINE_OUTPUT_SINK blob'
+    Write-Host '      azd up'
+    Write-Host '  Runbook section 6f.'
+}
+
+Write-Host ''
 Write-Host '  Full runbook, including verification and teardown:'
 Write-Host '    docs/deploy/azure-wizard.md'
 Write-Host ''

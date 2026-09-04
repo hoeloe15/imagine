@@ -19,7 +19,7 @@ import type { CostLedger } from "../../core/budget.js";
 import type { Config } from "../../core/config-schema.js";
 import { ImagineError, isImagineError, type FailureReason } from "../../core/errors.js";
 import { estimateCostUsd, type ModelKnowledge } from "../../core/knowledge.js";
-import { writeImage, type OutputConfig } from "../../core/output.js";
+import { writeImage, type ObjectSink, type OutputConfig } from "../../core/output.js";
 import { route, type RouteCandidate } from "../../core/router.js";
 import { USE_CASES, type ImageSize, type NormalisedRequest } from "../../core/types.js";
 import type { ImageProvider } from "../../providers/types.js";
@@ -33,6 +33,8 @@ export interface GenerateImageDependencies {
   ledger: CostLedger;
   /** Registered adapters, in the order they should be preferred. */
   providers: readonly ImageProvider[];
+  /** Where the bytes are stored. Absent means the local filesystem. */
+  sink?: ObjectSink;
 }
 
 const IMAGE_SIZES = [
@@ -85,7 +87,17 @@ export const generateImageInputSchema = generateImageInput.shape;
 export type GenerateImageArgs = z.infer<typeof generateImageInput>;
 
 export const generateImageOutputSchema = {
-  path: z.string().describe("Path of the image that was written."),
+  path: z
+    .string()
+    .describe(
+      "Where the image was written: a filesystem path with the local sink, and the blob's URL with the blob sink.",
+    ),
+  url: z
+    .string()
+    .optional()
+    .describe(
+      "A link to the image that needs no credentials, present only when the sink can hand one out. Render or download this; never expect image bytes in this result.",
+    ),
   provider: z.string().describe("Id of the adapter that produced the image."),
   model: z
     .string()
@@ -116,6 +128,7 @@ export const generateImageOutputSchema = {
 /** The success envelope of PLAN.md §5.1. */
 export interface GenerateImageSuccess {
   path: string;
+  url?: string;
   provider: string;
   model: string;
   cost_usd: number;
@@ -204,7 +217,7 @@ export async function generateImage(
   deps: GenerateImageDependencies,
   args: GenerateImageArgs,
 ): Promise<CallToolResult> {
-  const { config, knowledge, ledger, providers } = deps;
+  const { config, knowledge, ledger, providers, sink } = deps;
   const request = normalisedRequest(args);
 
   /** The candidate the ledger last authorised: who a failure belongs to. */
@@ -227,7 +240,12 @@ export async function generateImage(
       },
     });
 
-    const written = await writeImage(request, outcome.result, outputConfig(config));
+    const written = await writeImage(
+      request,
+      outcome.result,
+      outputConfig(config),
+      sink,
+    );
     const record = await ledger.record({
       provider: outcome.result.provider,
       model: outcome.result.model,
@@ -239,6 +257,7 @@ export async function generateImage(
 
     return succeeded({
       path: written.path,
+      ...(written.url === undefined ? {} : { url: written.url }),
       provider: outcome.result.provider,
       model: outcome.result.model,
       cost_usd: record.cost_usd,
@@ -302,9 +321,10 @@ export function registerGenerateImage(
     {
       title: "Generate an image",
       description:
-        "Generate an image, write it to disk and return its file path plus what it cost. " +
+        "Generate an image, store it and return where it went plus what it cost. " +
         "The image bytes never travel back to the client: put the returned path into your " +
-        "document, or read the file yourself if you need the pixels.",
+        "document, or read the file yourself if you need the pixels. When the server stores " +
+        "images in the cloud the result also carries url, a link anyone can open — show that.",
       inputSchema: generateImageInputSchema,
       outputSchema: generateImageOutputSchema,
       annotations: { readOnlyHint: false, openWorldHint: true },

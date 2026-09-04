@@ -29,8 +29,9 @@ cannot start the server cannot show you why.
 
 Config is merged least- to most-specific: **bundled defaults**, then
 `~/.imagine/config.json`, then `./config.json` in the server's working
-directory, then the `IMAGINE_CONFIG_JSON` environment variable. Every field is
-optional, so a fragment only contributes what it actually names.
+directory, then the `IMAGINE_OUTPUT_*` variables, then the `IMAGINE_CONFIG_JSON`
+environment variable. Every field is optional, so a fragment only contributes
+what it actually names.
 
 > **Where to put it.** The working directory of the server is whatever your MCP
 > client launches it in, which is usually not your project. Prefer
@@ -71,7 +72,9 @@ in any editor with JSON Schema support:
   "output": {
     "dir": "./imagine-output",
     "filename": "{slug}-{hash}.{ext}",
-    "manifest": "./imagine-output/manifest.jsonl"
+    "manifest": "./imagine-output/manifest.jsonl",
+    "sink": "local",
+    "blob": null
   },
   "budget": {
     "max_usd_per_session": 5,
@@ -232,3 +235,42 @@ provider, model, cost, dimensions, MIME type, duration and timestamp. That
 manifest is what the phase 2 gallery will read. Set it to `null` and it falls
 back to `manifest.jsonl` inside the resolved output directory. See
 [ADR 0006](adr/0006-output-writing-naming-and-the-manifest.md).
+
+### Storing images in Azure Blob Storage instead
+
+`output.sink` picks where the bytes go. `"local"`, the default, is everything
+above. `"blob"` uploads them to a container instead and adds a `url` to the tool
+result — a signed link that renders in a chat client without any Azure sign-in.
+It only works where the platform provides a managed identity, which means a
+hosted deployment, not a laptop.
+
+```json
+{
+  "output": {
+    "sink": "blob",
+    "blob": {
+      "account_url": "https://stabc123.blob.core.windows.net",
+      "container": "images",
+      "url_ttl_hours": 1
+    }
+  }
+}
+```
+
+| Field           | Default | Meaning                                                        |
+| --------------- | ------- | -------------------------------------------------------------- |
+| `account_url`   | —       | the storage account's blob endpoint, `https://` only            |
+| `container`     | —       | an existing container; this never creates one                   |
+| `url_ttl_hours` | `1`     | how long a returned link stays valid, 1 to 168                  |
+
+The naming rules, the never-overwrite rule and the manifest all still apply; the
+manifest stays a local file for now.
+
+Because the account URL and container only exist once a deployment has created
+them, four environment variables can fill this section in without anyone editing
+JSON: `IMAGINE_OUTPUT_SINK`, `IMAGINE_OUTPUT_BLOB_ACCOUNT_URL`,
+`IMAGINE_OUTPUT_BLOB_CONTAINER` and `IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS`. They sit
+just below `IMAGINE_CONFIG_JSON` in precedence, so an `output` section written by
+hand always wins. The azd template sets the first three for you
+([hosting](hosting.md#where-the-pictures-go),
+[ADR 0024](adr/0024-output-sinks-and-renderable-urls.md)).

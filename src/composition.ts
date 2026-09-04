@@ -11,7 +11,9 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { AZURE_STORAGE_SCOPE, createBlobSink } from "./core/blob-sink.js";
 import { openCostLedger, type CostLedger } from "./core/budget.js";
+import type { ObjectSink } from "./core/output.js";
 import { loadConfig, resolveApiKey, type LoadConfigOptions } from "./core/config.js";
 import { loadBundledModelKnowledge } from "./core/knowledge.js";
 import {
@@ -37,18 +39,22 @@ export interface BuildOptions extends LoadConfigOptions {
   providers?: readonly ImageProvider[];
   /** Replaces the ledger this function would otherwise open. */
   ledger?: CostLedger;
+  /** Replaces the output sink the `output` config would otherwise select. */
+  sink?: ObjectSink;
 }
 
 export async function buildDependencies(
   options: BuildOptions = {},
 ): Promise<ServerDependencies> {
-  const { providers, ledger, ...configOptions } = options;
+  const { providers, ledger, sink, ...configOptions } = options;
   const loaded = loadConfig(configOptions);
   const { config } = loaded;
+  const outputSink = sink ?? blobSink(loaded);
 
   return {
     config,
     env: loaded.env,
+    ...(outputSink === undefined ? {} : { sink: outputSink }),
     knowledge: loadBundledModelKnowledge(),
     ledger:
       ledger ??
@@ -61,6 +67,36 @@ export async function buildDependencies(
       azureProvider(loaded),
     ],
   };
+}
+
+/**
+ * The blob sink, when the config asks for it. Local mode gets `undefined` and
+ * `writeImage` keeps writing files, unchanged (ADR 0024).
+ */
+function blobSink(loaded: ReturnType<typeof loadConfig>): ObjectSink | undefined {
+  const { sink, blob } = loaded.config.output;
+  if (sink !== "blob" || blob === null) return undefined;
+
+  return createBlobSink({
+    accountUrl: blob.account_url,
+    container: blob.container,
+    urlTtlHours: blob.url_ttl_hours,
+    getAccessToken: hasManagedIdentity(loaded.env)
+      ? createManagedIdentityTokenProvider({
+          env: loaded.env,
+          scope: AZURE_STORAGE_SCOPE,
+        })
+      : noManagedIdentityForStorage,
+  });
+}
+
+function noManagedIdentityForStorage(): Promise<string> {
+  return Promise.reject(
+    new ImagineError(
+      "auth_failed",
+      `output.sink is "blob", but this process has no managed identity to obtain a token for ${AZURE_STORAGE_SCOPE} with: ${IDENTITY_ENDPOINT_ENV} and ${IDENTITY_HEADER_ENV} are not both set. The blob sink exists for hosted deployments, where the platform provides an identity; on a developer machine leave output.sink at "local".`,
+    ),
+  );
 }
 
 function azureProvider(loaded: ReturnType<typeof loadConfig>): AzureProvider {

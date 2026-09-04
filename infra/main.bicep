@@ -54,6 +54,13 @@ param authAudienceOverride string = ''
 @description('A config.json fragment for the container, as one JSON string. This is how the hosted server learns providers.azure.endpoint, deployments and auth, since the image has no config file. It holds no secrets: api_key_env names environment variables and never key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
 
+@description('Where generated images go. "local" is the container filesystem — fine over stdio, useless to a hosted chat client, which gets a path it cannot open. "blob" adds a storage account, a container and two role assignments, and the tool result carries a link that renders (ADR 0024).')
+@allowed([
+  'local'
+  'blob'
+])
+param outputSink string = 'local'
+
 @description('Resource id of the Azure AI Foundry / Azure OpenAI account to grant the container identity Cognitive Services OpenAI User on. It may live in another resource group or subscription. Empty skips the role assignment.')
 param foundryResourceId string = ''
 
@@ -90,6 +97,7 @@ module resources 'resources.bicep' = {
     authAudienceOverride: authAudienceOverride
     imagineConfigJson: imagineConfigJson
     foundryResourceId: foundryResourceId
+    outputSink: outputSink
   }
 }
 
@@ -110,6 +118,11 @@ output AZURE_KEY_VAULT_ENDPOINT string = resources.outputs.AZURE_KEY_VAULT_ENDPO
 output AZURE_MANAGED_IDENTITY_NAME string = resources.outputs.AZURE_MANAGED_IDENTITY_NAME
 output AZURE_MANAGED_IDENTITY_CLIENT_ID string = resources.outputs.AZURE_MANAGED_IDENTITY_CLIENT_ID
 output AZURE_MANAGED_IDENTITY_PRINCIPAL_ID string = resources.outputs.AZURE_MANAGED_IDENTITY_PRINCIPAL_ID
+
+output IMAGINE_OUTPUT_SINK string = resources.outputs.IMAGINE_OUTPUT_SINK
+output AZURE_STORAGE_ACCOUNT_NAME string = resources.outputs.AZURE_STORAGE_ACCOUNT_NAME
+output AZURE_STORAGE_BLOB_CONTAINER_NAME string = resources.outputs.AZURE_STORAGE_BLOB_CONTAINER_NAME
+output MCP_OUTPUT_BLOB_URL string = resources.outputs.MCP_OUTPUT_BLOB_URL
 
 output MCP_ENDPOINT_URL string = resources.outputs.MCP_ENDPOINT_URL
 

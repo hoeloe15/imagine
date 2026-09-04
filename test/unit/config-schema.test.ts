@@ -71,3 +71,55 @@ describe("the two schemas describe the same shape", () => {
     expect(configSchema.parse(DEFAULT_CONFIG)).toEqual(DEFAULT_CONFIG);
   });
 });
+
+describe("the output sink", () => {
+  const blob = {
+    account_url: "https://mystorage.blob.core.windows.net",
+    container: "images",
+  };
+
+  function merged(output: Record<string, unknown>) {
+    return configSchema.safeParse({
+      ...DEFAULT_CONFIG,
+      output: { ...DEFAULT_CONFIG.output, ...output },
+    });
+  }
+
+  it("is local unless something says otherwise", () => {
+    expect(DEFAULT_CONFIG.output.sink).toBe("local");
+    expect(DEFAULT_CONFIG.output.blob).toBeNull();
+  });
+
+  it("defaults a blob link to one hour", () => {
+    const parsed = merged({ sink: "blob", blob });
+
+    expect(parsed.success && parsed.data.output.blob?.url_ttl_hours).toBe(1);
+  });
+
+  it("refuses the blob sink with nowhere to put the bytes", () => {
+    const parsed = merged({ sink: "blob" });
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.path).toEqual(["output", "blob"]);
+  });
+
+  it("refuses a container name Azure would refuse", () => {
+    const parsed = merged({ sink: "blob", blob: { ...blob, container: "Images" } });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("refuses a link that outlives a user delegation key", () => {
+    const parsed = merged({ sink: "blob", blob: { ...blob, url_ttl_hours: 169 } });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts the blob section in a file fragment too", () => {
+    const parsed = configFileSchema.safeParse({
+      output: { sink: "blob", blob: { ...blob, url_ttl_hours: 6 } },
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+});

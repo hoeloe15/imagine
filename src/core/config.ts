@@ -2,9 +2,9 @@
  * Config discovery, merging, validation and API-key resolution.
  *
  * Precedence, least to most specific: bundled defaults, `~/.imagine/config.json`,
- * `./config.json`, `IMAGINE_CONFIG_JSON`. Environment variables win over any
- * `.env` file, and a `.env` next to a config file wins over one further up the
- * precedence chain.
+ * `./config.json`, the `IMAGINE_OUTPUT_*` variables, `IMAGINE_CONFIG_JSON`.
+ * Environment variables win over any `.env` file, and a `.env` next to a config
+ * file wins over one further up the precedence chain.
  *
  * **A key value never enters `Config`.** The config only ever names the
  * environment variable holding a key (`api_key_env`), so the whole object is
@@ -43,6 +43,22 @@ export const ENV_FILENAME = ".env";
  * writable filesystem to put a `config.json` on. See ADR 0022.
  */
 export const CONFIG_ENV_VAR = "IMAGINE_CONFIG_JSON";
+
+/**
+ * The one part of the config a deployment template can fill in on its own,
+ * because the values only exist once the storage account has been created.
+ * They are a convenience over {@link CONFIG_ENV_VAR}, never a replacement:
+ * anything `IMAGINE_CONFIG_JSON` says about `output` wins over these. See
+ * ADR 0024.
+ */
+export const OUTPUT_ENV_VARS = {
+  sink: "IMAGINE_OUTPUT_SINK",
+  accountUrl: "IMAGINE_OUTPUT_BLOB_ACCOUNT_URL",
+  container: "IMAGINE_OUTPUT_BLOB_CONTAINER",
+  urlTtlHours: "IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS",
+} as const;
+
+export const OUTPUT_ENV_ORIGIN = "the IMAGINE_OUTPUT_* environment variables";
 
 export type Env = Readonly<Record<string, string | undefined>>;
 
@@ -114,6 +130,13 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
   const env: Env = Object.freeze({ ...fromEnvFiles, ...ambient });
 
   const origins = [...sources];
+
+  const fromOutputEnv = outputFragment(env);
+  if (fromOutputEnv !== null) {
+    origins.push(OUTPUT_ENV_ORIGIN);
+    fragments.push(fromOutputEnv);
+  }
+
   const fromEnv = env[CONFIG_ENV_VAR];
   if (fromEnv !== undefined && fromEnv.trim().length > 0) {
     origins.push(CONFIG_ENV_VAR);
@@ -195,6 +218,51 @@ export function availableProviders(loaded: LoadedConfig): string[] {
       return false;
     }
   });
+}
+
+/**
+ * The `output` fragment the `IMAGINE_OUTPUT_*` variables describe, or `null`
+ * when none of them is set. It goes through `configFileSchema` like every other
+ * fragment, so a typo is the same kind of error wherever it was typed.
+ */
+function outputFragment(env: Env): Record<string, unknown> | null {
+  const sink = trimmed(env[OUTPUT_ENV_VARS.sink]);
+  const accountUrl = trimmed(env[OUTPUT_ENV_VARS.accountUrl]);
+  const container = trimmed(env[OUTPUT_ENV_VARS.container]);
+  const ttl = trimmed(env[OUTPUT_ENV_VARS.urlTtlHours]);
+
+  if (
+    sink === undefined &&
+    accountUrl === undefined &&
+    container === undefined &&
+    ttl === undefined
+  ) {
+    return null;
+  }
+
+  if (ttl !== undefined && !/^\d+$/.test(ttl)) {
+    throw configError(
+      `${OUTPUT_ENV_VARS.urlTtlHours} is "${ttl}", which is not a whole number of hours.`,
+    );
+  }
+
+  const blob = {
+    ...(accountUrl === undefined ? {} : { account_url: accountUrl }),
+    ...(container === undefined ? {} : { container }),
+    ...(ttl === undefined ? {} : { url_ttl_hours: Number(ttl) }),
+  };
+
+  const output = {
+    ...(sink === undefined ? {} : { sink }),
+    ...(Object.keys(blob).length === 0 ? {} : { blob }),
+  };
+
+  return parseFragment(OUTPUT_ENV_ORIGIN, JSON.stringify({ output }));
+}
+
+function trimmed(value: string | undefined): string | undefined {
+  const cleaned = value?.trim();
+  return cleaned === undefined || cleaned === "" ? undefined : cleaned;
 }
 
 function readIfPresent(path: string): string | null {

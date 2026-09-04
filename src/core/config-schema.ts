@@ -32,6 +32,33 @@ const envVarName = z
 
 const path = z.string().min(1, "expected a non-empty path");
 const usd = z.number().positive("expected a positive amount in US dollars");
+const sink = z.enum(["local", "blob"]);
+
+const accountUrl = z.url(
+  "expected an absolute URL, e.g. https://mystorage.blob.core.windows.net",
+);
+const containerName = z
+  .string()
+  .regex(
+    /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/,
+    "expected an Azure blob container name: 3 to 63 lowercase letters, digits and hyphens",
+  );
+/** A user delegation key is only valid for seven days, so neither is a URL. */
+const urlTtlHours = z.number().int().min(1).max(168);
+
+const blobFileSchema = z
+  .strictObject({
+    account_url: accountUrl,
+    container: containerName,
+    url_ttl_hours: urlTtlHours,
+  })
+  .partial();
+
+const blobSchema = z.strictObject({
+  account_url: accountUrl,
+  container: containerName,
+  url_ttl_hours: urlTtlHours.default(1),
+});
 
 const providerFileSchema = z
   .strictObject({
@@ -66,7 +93,13 @@ export const configFileSchema = z
       .partial(),
     providers: z.record(z.string().min(1), providerFileSchema),
     output: z
-      .strictObject({ dir: path, filename: path, manifest: path.nullable() })
+      .strictObject({
+        dir: path,
+        filename: path,
+        manifest: path.nullable(),
+        sink,
+        blob: blobFileSchema.nullable(),
+      })
       .partial(),
     budget: z
       .strictObject({
@@ -92,6 +125,8 @@ export const configSchema = z
       dir: path,
       filename: path,
       manifest: path.nullable(),
+      sink: sink.default("local"),
+      blob: blobSchema.nullable().default(null),
     }),
     budget: z.strictObject({
       max_usd_per_session: usd.nullable(),
@@ -101,6 +136,15 @@ export const configSchema = z
     logging: z.strictObject({ level: logLevel, cost_log: path.nullable() }),
   })
   .superRefine((value, ctx) => {
+    if (value.output.sink === "blob" && value.output.blob === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["output", "blob"],
+        message:
+          'required: output.sink is "blob", so the account URL and container to upload to have to be named',
+      });
+    }
+
     for (const [id, provider] of Object.entries(value.providers)) {
       if (!provider.enabled) continue;
 
@@ -150,6 +194,8 @@ export type ProviderConfig = Config["providers"][string];
 export type LogLevel = z.infer<typeof logLevel>;
 export type OnBudgetExceeded = z.infer<typeof onExceed>;
 export type ProviderAuth = z.infer<typeof auth>;
+export type OutputSink = z.infer<typeof sink>;
+export type BlobOutputConfig = z.infer<typeof blobSchema>;
 
 /**
  * The zero-config baseline: OpenRouter on, everything else off but named, so a
@@ -167,6 +213,8 @@ export const DEFAULT_CONFIG: Config = configSchema.parse({
     dir: "./imagine-output",
     filename: "{slug}-{hash}.{ext}",
     manifest: "./imagine-output/manifest.jsonl",
+    sink: "local",
+    blob: null,
   },
   budget: {
     max_usd_per_session: 5,

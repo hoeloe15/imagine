@@ -52,6 +52,9 @@
     },
     "foundryResourceId": {
       "value": "${IMAGINE_FOUNDRY_RESOURCE_ID=}"
+    },
+    "outputSink": {
+      "value": "${IMAGINE_OUTPUT_SINK=local}"
     }
   }
 }

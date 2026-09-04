@@ -496,3 +496,81 @@ describe("IMAGINE_CONFIG_JSON", () => {
     expect(message).toContain("providers.azure.endpoint");
   });
 });
+
+describe("the IMAGINE_OUTPUT_* variables", () => {
+  const blobEnv: Env = {
+    IMAGINE_OUTPUT_SINK: "blob",
+    IMAGINE_OUTPUT_BLOB_ACCOUNT_URL: "https://mystorage.blob.core.windows.net",
+    IMAGINE_OUTPUT_BLOB_CONTAINER: "images",
+  };
+
+  it("are ignored entirely when none is set", () => {
+    const loaded = load({});
+
+    expect(loaded.config.output).toEqual(DEFAULT_CONFIG.output);
+    expect(loaded.origins).toEqual([]);
+  });
+
+  it("select the blob sink and name where it writes", () => {
+    const loaded = load(blobEnv);
+
+    expect(loaded.config.output.sink).toBe("blob");
+    expect(loaded.config.output.blob).toEqual({
+      account_url: "https://mystorage.blob.core.windows.net",
+      container: "images",
+      url_ttl_hours: 1,
+    });
+  });
+
+  it("appear as an origin, so an error can name them", () => {
+    expect(load(blobEnv).origins).toContain(
+      "the IMAGINE_OUTPUT_* environment variables",
+    );
+  });
+
+  it("lose to IMAGINE_CONFIG_JSON, which an operator typed deliberately", () => {
+    const loaded = load({
+      ...blobEnv,
+      IMAGINE_CONFIG_JSON: JSON.stringify({
+        output: { blob: { container: "gallery" } },
+      }),
+    });
+
+    expect(loaded.config.output.blob?.container).toBe("gallery");
+    expect(loaded.config.output.blob?.account_url).toBe(
+      "https://mystorage.blob.core.windows.net",
+    );
+  });
+
+  it("beat a config file, which is only what happens to be on the machine", () => {
+    writeProjectConfig({ output: { sink: "local" } });
+
+    expect(load(blobEnv).config.output.sink).toBe("blob");
+  });
+
+  it("reject a ttl that is not a whole number of hours", () => {
+    const failure = attempt(() =>
+      load({ ...blobEnv, IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS: "half a day" }),
+    );
+
+    expect(failure).toContain("IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS");
+  });
+
+  it("report a bad value against the field it lands in", () => {
+    const failure = attempt(() =>
+      load({ ...blobEnv, IMAGINE_OUTPUT_BLOB_ACCOUNT_URL: "mystorage" }),
+    );
+
+    expect(failure).toContain("the IMAGINE_OUTPUT_* environment variables");
+    expect(failure).toContain("output.blob.account_url");
+  });
+});
+
+function attempt(run: () => unknown): string {
+  try {
+    run();
+  } catch (cause) {
+    return isImagineError(cause) ? cause.message : String(cause);
+  }
+  return "";
+}

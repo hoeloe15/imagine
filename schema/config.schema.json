@@ -1,8 +1,8 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/config.schema.json",
   "title": "imagine configuration",
   "description": "Configuration for the imagine MCP server. API keys are never stored here: api_key_env names the environment variable holding the key.",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
     "$schema": {
@@ -112,6 +112,36 @@
             {
               "type": "string",
               "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sink": {
+          "type": "string",
+          "enum": ["local", "blob"]
+        },
+        "blob": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "account_url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "container": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$"
+                },
+                "url_ttl_hours": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 168
+                }
+              },
+              "additionalProperties": false
             },
             {
               "type": "null"

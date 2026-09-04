@@ -23,6 +23,13 @@ param imagineConfigJson string = ''
 @description('Resource id of the Azure AI Foundry / Azure OpenAI account the container identity gets Cognitive Services OpenAI User on. Empty skips the role assignment.')
 param foundryResourceId string = ''
 
+@description('Where generated images are stored. "local" writes to the container filesystem, which is ephemeral and unreachable for a chat client; "blob" provisions a storage account and returns a link the client can render (ADR 0024).')
+@allowed([
+  'local'
+  'blob'
+])
+param outputSink string = 'local'
+
 @description('Port the container listens on. The entrypoint resolves IMAGINE_HTTP_PORT, then PORT, then 8080 (ADR 0018).')
 param targetPort int = 8080
 
@@ -34,6 +41,10 @@ var containerAppName = 'ca-imagine-${token}'
 var registryName = 'acr${token}'
 var identityName = 'id-imagine-${token}'
 var keyVaultName = 'kv-imagine-${token}'
+var storageAccountName = 'st${token}'
+var outputContainerName = 'images'
+
+var blobSinkEnabled = outputSink == 'blob'
 
 var openRouterSecretName = 'openrouter-api-key'
 var azureOpenAiSecretName = 'azure-openai-api-key'
@@ -43,6 +54,11 @@ var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 var keyVaultSecretsOfficerRoleId = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 // `az role definition list --name "Cognitive Services OpenAI User"`.
 var cognitiveServicesOpenAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+// Read live, never from memory (commit 911edea shipped an invented GUID):
+//   az role definition list --name "Storage Blob Data Contributor" --query "[].name" -o tsv
+//   az role definition list --name "Storage Blob Delegator" --query "[].name" -o tsv
+var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+var storageBlobDelegatorRoleId = 'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
@@ -138,6 +154,65 @@ resource keyVaultSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsOfficerRoleId)
     principalId: principalId
+  }
+}
+
+// Shared key access is off, so the identity is the only way in and no
+// connection string exists to leak. Public blob access is off too: a link is
+// handed out as a short-lived user delegation SAS instead (ADR 0024).
+resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = if (blobSinkEnabled) {
+  name: storageAccountName
+  location: location
+  tags: tags
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    supportsHttpsTrafficOnly: true
+    allowBlobPublicAccess: false
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
+    publicNetworkAccess: 'Enabled'
+    accessTier: 'Hot'
+  }
+}
+
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = if (blobSinkEnabled) {
+  parent: storage
+  name: 'default'
+}
+
+resource outputContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (blobSinkEnabled) {
+  parent: blobService
+  name: outputContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// Write access is scoped to the one container, not the account.
+resource storageBlobDataContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (blobSinkEnabled) {
+  name: guid(storage.id, outputContainerName, identity.id, storageBlobDataContributorRoleId)
+  scope: outputContainer
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Signing a user delegation SAS needs generateUserDelegationKey, which is an
+// account-level action: scoping this to the container would make every link
+// request fail with 403 (Get User Delegation Key, "Permissions").
+resource storageBlobDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (blobSinkEnabled) {
+  name: guid(storage.id, identity.id, storageBlobDelegatorRoleId)
+  scope: storage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDelegatorRoleId)
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -275,6 +350,27 @@ var providerEnv = concat(
 // identities to mint a token for; with a user-assigned identity the request is
 // ambiguous without it (ADR 0022). IMAGINE_CONFIG_JSON is the container's whole
 // config.json — it carries api_key_env names, never key values.
+// The account URL and container only exist once the storage account does, so
+// the template fills them in rather than asking the operator to paste them into
+// IMAGINE_CONFIG_JSON. An output section in IMAGINE_CONFIG_JSON still wins
+// (ADR 0024).
+var blobSinkEnv = blobSinkEnabled
+  ? [
+      {
+        name: 'IMAGINE_OUTPUT_SINK'
+        value: 'blob'
+      }
+      {
+        name: 'IMAGINE_OUTPUT_BLOB_ACCOUNT_URL'
+        value: storage!.properties.primaryEndpoints.blob
+      }
+      {
+        name: 'IMAGINE_OUTPUT_BLOB_CONTAINER'
+        value: outputContainerName
+      }
+    ]
+  : []
+
 var containerEnv = concat(
   [
     {
@@ -286,6 +382,7 @@ var containerEnv = concat(
       value: identity.properties.clientId
     }
   ],
+  blobSinkEnv,
   empty(imagineConfigJson)
     ? []
     : [
@@ -384,6 +481,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     acrPull
     keyVaultSecretsUser
     foundryRole
+    storageBlobDataContributor
+    storageBlobDelegator
   ]
 }
 
@@ -398,4 +497,13 @@ output AZURE_MANAGED_IDENTITY_CLIENT_ID string = identity.properties.clientId
 output AZURE_MANAGED_IDENTITY_PRINCIPAL_ID string = identity.properties.principalId
 output MCP_ENDPOINT_URL string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
 output MCP_RESOURCE_URI string = '${mcpEndpointUrl}/mcp'
+
+output IMAGINE_OUTPUT_SINK string = outputSink
+output AZURE_STORAGE_ACCOUNT_NAME string = blobSinkEnabled ? storage.name : ''
+output AZURE_STORAGE_BLOB_CONTAINER_NAME string = blobSinkEnabled ? outputContainerName : ''
+// The container images land in. Nothing in it is readable without a link the
+// server signs, so this URL is a location, not an access grant.
+output MCP_OUTPUT_BLOB_URL string = blobSinkEnabled
+  ? '${storage!.properties.primaryEndpoints.blob}${outputContainerName}'
+  : ''
 
