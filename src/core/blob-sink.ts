@@ -293,15 +293,18 @@ export function createBlobSink(options: BlobSinkOptions): ObjectSink {
     }
   }
 
-  async function readLink(name: string): Promise<string> {
+  async function readLink(
+    name: string,
+  ): Promise<{ url: string; url_expires_at: string }> {
     const key = await delegationKey();
     const startMs = now() - CLOCK_SKEW_MS;
     const expiryMs = Math.min(now() + ttlMs, Date.parse(key.signedExpiry));
+    const expiry = isoSeconds(expiryMs);
 
     const query = userDelegationSasQuery({
       permissions: "r",
       start: isoSeconds(startMs),
-      expiry: isoSeconds(expiryMs),
+      expiry,
       canonicalizedResource: `/blob/${accountName}/${container}/${name}`,
       key,
       protocol: "https",
@@ -309,7 +312,9 @@ export function createBlobSink(options: BlobSinkOptions): ObjectSink {
       resource: "b",
     });
 
-    return `${blobUrl(name)}?${query}`;
+    // The `se` field of the SAS is the moment the link dies, so the envelope
+    // reports exactly what was signed rather than a second guess at the TTL.
+    return { url: `${blobUrl(name)}?${query}`, url_expires_at: expiry };
   }
 
   return {
@@ -333,7 +338,7 @@ export function createBlobSink(options: BlobSinkOptions): ObjectSink {
         }
 
         await bodyText(response);
-        return { path: blobUrl(name), url: await readLink(name) };
+        return { path: blobUrl(name), ...(await readLink(name)) };
       }
 
       throw new ImagineError(

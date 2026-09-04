@@ -67,10 +67,11 @@ calling model can read it and act:
 
 ### `path` and `url`
 
-| Field  | Local (`output.sink: "local"`) | Cloud (`output.sink: "blob"`)               |
-| ------ | ------------------------------ | ------------------------------------------- |
-| `path` | the file that was written      | the blob's own URL, without any access token |
-| `url`  | absent                         | a link that opens without credentials        |
+| Field            | Local (`output.sink: "local"`) | Cloud (`output.sink: "blob"`)                |
+| ---------------- | ------------------------------ | -------------------------------------------- |
+| `path`           | the file that was written      | the blob's own URL, without any access token  |
+| `url`            | absent                         | a link that opens without credentials         |
+| `url_expires_at` | absent                         | ISO 8601 moment that link stops working       |
 
 `url` appears only when the server stores images somewhere it can hand out a
 link. It is a short-lived signed URL — one hour by default, `output.blob.
@@ -79,15 +80,38 @@ and it stops working on its own. Render it, or download it if you need the
 pixels; the bytes are still never in the result itself
 ([ADR 0024](adr/0024-output-sinks-and-renderable-urls.md)).
 
+`url_expires_at` is the exact moment that link dies — the same instant the
+signature was issued for, not a rounded-off guess at the TTL. It is there so a
+model never has to invent a validity period; say what it says, or say nothing.
+
 ```json
 {
   "path": "https://stabc123.blob.core.windows.net/images/a-lighthouse-at-dusk-7f3ac91d.png",
   "url": "https://stabc123.blob.core.windows.net/images/a-lighthouse-at-dusk-7f3ac91d.png?sp=r&st=...&sig=...",
+  "url_expires_at": "2026-09-04T13:00:00Z",
   "provider": "azure",
   "model": "gpt-image-2",
   "cost_usd": 0.04
 }
 ```
+
+### How the result asks to be shown
+
+A chat client handed only the JSON above tends to print the link and tell the
+user it cannot display images. So when `url` is present the result carries two
+more things next to the envelope, both of them about rendering and neither of
+them containing any pixels:
+
+- a second text block spelling out what to do —
+  `Show the image to the user with markdown: ![A lighthouse at dusk](<url>)
+(link valid until 2026-09-04T13:00:00Z). Do not fetch, download or re-encode
+the bytes, and do not state any other validity period.`
+- a `resource_link` content item (`uri` the link, `name` the filename,
+  `mimeType` the image type, `description` a short form of the prompt), which
+  clients that understand it render on their own.
+
+The first content block is still the JSON envelope, untouched, so anything that
+parses `content[0].text` keeps working.
 
 ## `list_capabilities`
 

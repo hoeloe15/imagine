@@ -98,6 +98,12 @@ export const generateImageOutputSchema = {
     .describe(
       "A link to the image that needs no credentials, present only when the sink can hand one out. Render or download this; never expect image bytes in this result.",
     ),
+  url_expires_at: z
+    .string()
+    .optional()
+    .describe(
+      "When url stops working, ISO 8601. Present whenever url is. Do not invent a validity period; this is the one.",
+    ),
   provider: z.string().describe("Id of the adapter that produced the image."),
   model: z
     .string()
@@ -129,6 +135,7 @@ export const generateImageOutputSchema = {
 export interface GenerateImageSuccess {
   path: string;
   url?: string;
+  url_expires_at?: string;
   provider: string;
   model: string;
   cost_usd: number;
@@ -195,11 +202,86 @@ function asImagineError(cause: unknown): ImagineError {
   return new ImagineError("unknown", detail, { cause });
 }
 
-function succeeded(payload: GenerateImageSuccess): CallToolResult {
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-    structuredContent: { ...payload },
-  };
+const ALT_TEXT_MAX_LENGTH = 60;
+
+/**
+ * A short, human-readable stand-in for the prompt. The brackets and parentheses
+ * come out because this ends up inside a markdown image, where they would end
+ * the alt text early.
+ */
+export function altTextFromPrompt(prompt: string): string {
+  const cleaned = prompt
+    .replace(/\s+/g, " ")
+    .replace(/[[\]()]/g, "")
+    .trim();
+  if (cleaned === "") return "Generated image";
+  if (cleaned.length <= ALT_TEXT_MAX_LENGTH) return cleaned;
+  return `${cleaned.slice(0, ALT_TEXT_MAX_LENGTH).trimEnd()}…`;
+}
+
+/** The last path segment of wherever the image landed, URL or filesystem path. */
+function fileNameFrom(location: string): string {
+  const segment = (() => {
+    try {
+      return decodeURIComponent(new URL(location).pathname.split("/").pop() ?? "");
+    } catch {
+      return location.split(/[\\/]/).pop() ?? "";
+    }
+  })();
+  return segment === "" ? "image" : segment;
+}
+
+/** Everything the rendering hint needs, gathered once the image is stored. */
+interface RenderableImage {
+  url: string;
+  url_expires_at?: string;
+  alt: string;
+  filename: string;
+  mimeType: string;
+}
+
+/**
+ * The success envelope, plus — when there is a link — the two things a hosted
+ * chat client needs to actually show the picture.
+ *
+ * Observed live: a client handed only `url` in JSON renders it as a bare link
+ * and tells the user it cannot display images. So the result also says, in
+ * words the model reads, to write a markdown image, and repeats the link as a
+ * `resource_link` content item for clients that render those natively.
+ *
+ * The first content item stays pure JSON: that is the envelope every client and
+ * test parses, so the hint is a second text item rather than a suffix on it.
+ */
+function succeeded(
+  payload: GenerateImageSuccess,
+  renderable?: RenderableImage,
+): CallToolResult {
+  const content: CallToolResult["content"] = [
+    { type: "text", text: JSON.stringify(payload, null, 2) },
+  ];
+
+  if (renderable !== undefined) {
+    const validity =
+      renderable.url_expires_at === undefined
+        ? ""
+        : ` (link valid until ${renderable.url_expires_at})`;
+    content.push({
+      type: "text",
+      text:
+        `Show the image to the user with markdown: ` +
+        `![${renderable.alt}](${renderable.url})${validity}. ` +
+        `Do not fetch, download or re-encode the bytes, and do not state any other validity period.`,
+    });
+    content.push({
+      type: "resource_link",
+      uri: renderable.url,
+      name: renderable.filename,
+      mimeType: renderable.mimeType,
+      description: renderable.alt,
+    });
+  }
+
+  return { content, structuredContent: { ...payload } };
 }
 
 function failed(payload: GenerateImageFailure): CallToolResult {
@@ -255,22 +337,38 @@ export async function generateImage(
       image_path: written.path,
     });
 
-    return succeeded({
-      path: written.path,
-      ...(written.url === undefined ? {} : { url: written.url }),
-      provider: outcome.result.provider,
-      model: outcome.result.model,
-      cost_usd: record.cost_usd,
-      duration_ms: outcome.result.duration_ms,
-      width: outcome.result.width,
-      height: outcome.result.height,
-      selection_reason: outcome.selection_reason,
-      budget: {
-        session_spent_usd: ledger.spentThisSession(),
-        session_limit_usd: ledger.budget.max_usd_per_session,
+    return succeeded(
+      {
+        path: written.path,
+        ...(written.url === undefined ? {} : { url: written.url }),
+        ...(written.url === undefined || written.url_expires_at === undefined
+          ? {}
+          : { url_expires_at: written.url_expires_at }),
+        provider: outcome.result.provider,
+        model: outcome.result.model,
+        cost_usd: record.cost_usd,
+        duration_ms: outcome.result.duration_ms,
+        width: outcome.result.width,
+        height: outcome.result.height,
+        selection_reason: outcome.selection_reason,
+        budget: {
+          session_spent_usd: ledger.spentThisSession(),
+          session_limit_usd: ledger.budget.max_usd_per_session,
+        },
+        ...(warning === undefined ? {} : { budget_warning: warning }),
       },
-      ...(warning === undefined ? {} : { budget_warning: warning }),
-    });
+      written.url === undefined
+        ? undefined
+        : {
+            url: written.url,
+            ...(written.url_expires_at === undefined
+              ? {}
+              : { url_expires_at: written.url_expires_at }),
+            alt: altTextFromPrompt(request.prompt),
+            filename: fileNameFrom(written.path),
+            mimeType: outcome.result.mime_type,
+          },
+    );
   } catch (cause) {
     const failure = asImagineError(cause);
     return failed({
@@ -324,7 +422,10 @@ export function registerGenerateImage(
         "Generate an image, store it and return where it went plus what it cost. " +
         "The image bytes never travel back to the client: put the returned path into your " +
         "document, or read the file yourself if you need the pixels. When the server stores " +
-        "images in the cloud the result also carries url, a link anyone can open — show that.",
+        "images in the cloud the result also carries url, a link anyone can open — show that. " +
+        "When url is present, present it to the user as a markdown image — ![alt](url) — so they " +
+        "see the picture rather than a link, say it is valid until url_expires_at and nothing else, " +
+        "and never fetch, download or re-encode the bytes yourself.",
       inputSchema: generateImageInputSchema,
       outputSchema: generateImageOutputSchema,
       annotations: { readOnlyHint: false, openWorldHint: true },

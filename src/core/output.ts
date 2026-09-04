@@ -29,6 +29,11 @@ export interface OutputConfig {
 export interface StoredImage {
   path: string;
   url?: string;
+  /**
+   * When `url` stops working, ISO 8601. Present only alongside a `url` whose
+   * sink knows its own expiry, so a client never has to guess one.
+   */
+  url_expires_at?: string;
 }
 
 /**

@@ -218,3 +218,34 @@ around.
 None of this has run against a live storage account. `az bicep build` passes,
 the sink is covered by unit tests with an injected `fetch`, and the first-run
 checklist is in `docs/deploy/azure-wizard.md`.
+
+## Amendment, 2026-09-04: a link is not the same as a picture
+
+The sink shipped and worked — and the user still did not see the image. In a
+hosted chat client the model got `path` and `url` back, printed the URL as a
+plain link, said it could not display images, and volunteered that the link was
+"valid for 24 hours", a number nothing in the result had told it. Two separate
+gaps: the envelope never said *how* to present the link, and it never said when
+the link dies, so the model filled the silence in.
+
+Both are now answered in the result rather than in a runbook:
+
+- **`url_expires_at`** is the ISO 8601 moment the link stops working, present
+  exactly when `url` is. It is the `se` field of the signature itself, so the
+  envelope and the token cannot drift apart, and a model that would otherwise
+  guess has the real answer to hand. Local mode has no link and therefore no
+  expiry — the field is absent, not empty, for the same reason `url` is.
+- **A rendering hint**, as a second text content item, telling the model to
+  write `![alt](url)`, to quote that expiry and no other, and not to fetch or
+  re-encode the bytes. It is stated to the model because the model is what
+  decides how the answer is rendered; a schema description alone was not enough,
+  as the observed behaviour shows.
+- **A `resource_link` content item**, which the installed MCP SDK supports, is
+  emitted alongside it and is the preferred path: a client that understands
+  `resource_link` renders the image without any instruction at all. The text
+  hint exists for the clients that do not, so both ship together rather than one
+  replacing the other.
+
+The JSON envelope stays the first content item and stays untouched, because it
+is what clients and tests parse. Nothing here weakens PLAN.md §4.2: what crosses
+the boundary is still a link, a filename and a sentence, never a byte of image.

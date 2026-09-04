@@ -119,8 +119,17 @@ async function connect(deps: ServerDependencies): Promise<Client> {
   return client;
 }
 
+interface ContentItem {
+  type: string;
+  text?: string;
+  uri?: string;
+  name?: string;
+  mimeType?: string;
+  description?: string;
+}
+
 interface ToolResult {
-  content: { type: string; text: string }[];
+  content: ContentItem[];
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
@@ -355,6 +364,51 @@ describe("the blob sink, end to end", () => {
     expect(result.structuredContent?.["url"]).toBe(body["url"]);
   });
 
+  it("says when the link expires, in ISO 8601 and in the future", async () => {
+    const result = await callGenerateImage(blobDependencies(), {
+      prompt: "A lighthouse at dusk",
+    });
+
+    const body = payload(result);
+    const expiry = String(body["url_expires_at"]);
+    expect(expiry).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(Date.parse(expiry)).toBeGreaterThan(Date.now());
+    // One hour of TTL, so within the hour and not much short of it.
+    expect(Date.parse(expiry) - Date.now()).toBeLessThanOrEqual(60 * 60 * 1000);
+    expect(Date.parse(expiry) - Date.now()).toBeGreaterThan(55 * 60 * 1000);
+    // The envelope's expiry is the moment the SAS itself was signed for.
+    expect(String(body["url"])).toContain(`se=${encodeURIComponent(expiry)}`);
+    expect(result.structuredContent?.["url_expires_at"]).toBe(expiry);
+  });
+
+  it("tells the model to render the link as a markdown image", async () => {
+    const result = await callGenerateImage(blobDependencies(), {
+      prompt: "A lighthouse at dusk",
+    });
+
+    const body = payload(result);
+    const hint = result.content.find(
+      (item) => item.type === "text" && item.text?.startsWith("Show the image"),
+    );
+    expect(hint?.text).toContain(
+      `![A lighthouse at dusk](${String(body["url"])}) (link valid until ${String(body["url_expires_at"])})`,
+    );
+    expect(hint?.text).toContain("Do not fetch, download or re-encode the bytes");
+  });
+
+  it("repeats the link as a resource_link content item", async () => {
+    const result = await callGenerateImage(blobDependencies(), {
+      prompt: "A lighthouse at dusk",
+    });
+
+    const body = payload(result);
+    const link = result.content.find((item) => item.type === "resource_link");
+    expect(link?.uri).toBe(body["url"]);
+    expect(link?.name).toMatch(/^a-lighthouse-at-dusk-[0-9a-f]{8}\.png$/);
+    expect(link?.mimeType).toBe("image/png");
+    expect(link?.description).toBe("A lighthouse at dusk");
+  });
+
   it("still never sends the bytes back", async () => {
     const result = await callGenerateImage(blobDependencies(), {
       prompt: "A lighthouse at dusk",
@@ -378,5 +432,7 @@ describe("the blob sink, end to end", () => {
     });
 
     expect(payload(result)["url"]).toBeUndefined();
+    expect(payload(result)["url_expires_at"]).toBeUndefined();
+    expect(result.content.map((item) => item.type)).toEqual(["text"]);
   });
 });
