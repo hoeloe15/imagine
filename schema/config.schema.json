@@ -99,8 +99,31 @@
               "minLength": 1
             },
             "additionalProperties": {
-              "type": "string",
-              "minLength": 1
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "deployment": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dialect": {
+                      "type": "string",
+                      "enum": ["openai", "mai"]
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  },
+                  "required": ["deployment"],
+                  "additionalProperties": false
+                }
+              ]
             }
           }
         },

@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/models.schema.json",
   "schema_version": 1,
-  "updated": "2026-08-26",
-  "disclaimer": "Scores are editorial judgements informed by public leaderboards and hands-on testing, not measurements. Prices are indicative list prices per image at ~1K resolution and change frequently — always confirm with the provider before relying on a number here. Where a provider reports the actual cost of a call, that reported cost wins over this file.",
+  "updated": "2026-09-04",
+  "disclaimer": "Scores are editorial judgements informed by public leaderboards and hands-on testing, not measurements. Prices are indicative list prices per image at ~1K resolution and change frequently — always confirm with the provider before relying on a number here. Some providers publish a per-token rate rather than a per-image one; those entries carry a per-image figure derived from a measured token count, and the model notes say so. Where a provider reports the actual cost of a call, that reported cost wins over this file.",
   "models": [
     {
       "id": "gpt-image-2",
@@ -145,7 +145,40 @@
         }
       ],
       "max_size": "1440x1440",
-      "notes": "Strongest photorealism of the set, and second only to GPT Image 2 on embedded text — pick it for a hero photo or a product shot where a flash-tier render looks synthetic. Do not pick it as a bulk default: at ~$0.055 it is three times the price of Grok for work neither model's output quality decides. OpenRouter-only in the MVP; availability through the Azure AI Foundry model catalogue is unconfirmed."
+      "notes": "Strongest photorealism of the set, and second only to GPT Image 2 on embedded text — pick it for a hero photo or a product shot where a flash-tier render looks synthetic. Do not pick it as a bulk default: at ~$0.055 it is three times the price of Grok for work neither model's output quality decides. OpenRouter-only in the MVP; availability through the Azure AI Foundry model catalogue is unconfirmed. Its photoreal rating of 5 is under review: on the public image arena read on 2026-09-04 it sits about 178 points below MAI-Image 2.6, which makes the top mark hard to defend, and the whole file's scores are due a re-baseline against that board (issue #59)."
+    },
+    {
+      "id": "mai-image-2.6",
+      "display_name": "MAI-Image 2.6",
+      "family": "microsoft",
+      "leaderboard": {
+        "source": "public image arena",
+        "rank_band": "top-3",
+        "checked": "2026-09-04"
+      },
+      "strengths": {
+        "text_in_image": 4,
+        "photoreal": 5,
+        "illustration": 4,
+        "diagram": 3,
+        "fast_bulk": 2
+      },
+      "typical_latency_s": 40,
+      "price": {
+        "per_image_usd": 0.048,
+        "per_image_usd_4k": null,
+        "confidence": "indicative",
+        "checked": "2026-09-04"
+      },
+      "availability": [
+        {
+          "provider": "azure",
+          "model_ref": "mai-image-2.6",
+          "note": "Preview, and undocumented at 2.6 — Microsoft's how-to covers the 2.5 family only. Reached over the MAI API, which is a different wire shape from GPT Image 2: the deployment entry in providers.azure.deployments has to use the object form with \"dialect\": \"mai\", e.g. {\"deployment\": \"mai-image-2-6\", \"dialect\": \"mai\"}. One image per call, width and height instead of a size string, and a pixel budget of 1,048,576."
+        }
+      ],
+      "max_size": "1024x1024",
+      "notes": "The strongest model here after GPT Image 2, and the only one that comes with an Entra-governed Azure endpoint of its own — pick it for photoreal, product and brand imagery inside an organisation that wants the whole pipeline in its own tenant. Do not pick it for bulk or for anything interactive: one image per call, no batching, a quota measured in a couple of requests per minute, and the only published latency figure for the previous generation is about 45 seconds. Do not pick it when the output has to be larger than about a megapixel either — width times height is capped at 1,048,576, so 1024x1024 is the ceiling, a requested 1536x1024 is shrunk to fit, and there is no 4K tier. The price is derived, not a list price: Microsoft prices this family per token and publishes no rate for 2.6 at all, so the figure here is the published 2.5 output rate applied to a token count measured on a real call (1,014 output tokens for a one-megapixel image, 2026-09-04). Treat it as indicative and check a billing line before relying on it. Scores rest on the public image arena of 2026-09-04 (rank 2, ahead of everything here except GPT Image 2) plus Microsoft's own claim of a large gain in text rendering over 2.5; the diagram score is an honest unproven middle, not a measurement."
     }
   ]
 }

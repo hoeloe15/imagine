@@ -139,6 +139,27 @@ export interface SecretStore {
 }
 
 /**
+ * The write half, which only the portal uses. It is a separate interface so
+ * that reading a secret and replacing one stay two different capabilities: a
+ * fake store in a test, or a future read-only store, satisfies
+ * {@link SecretStore} without gaining the ability to overwrite anything.
+ *
+ * Both operations invalidate this store's own cache before returning, so the
+ * replica that wrote sees the new value at once. Other replicas see it when
+ * their cache expires, which is the honest "within a minute" of ADR 0026.
+ */
+export interface SecretWriter {
+  set(name: string, value: string): Promise<void>;
+  /** Deletes the secret. A secret that was not there is not an error. */
+  remove(name: string): Promise<void>;
+}
+
+export type WritableSecretStore = SecretStore & SecretWriter;
+
+/** Key Vault's own rule for a secret name, so a pasted key cannot be one. */
+export const SECRET_NAME_PATTERN = /^[A-Za-z0-9-]{1,127}$/;
+
+/**
  * The name of the Key Vault secret a provider's key lives in, derived from the
  * environment variable it names: lower-cased, underscores to hyphens.
  * `OPENROUTER_API_KEY` becomes `openrouter-api-key`, which is exactly the name
@@ -182,7 +203,7 @@ interface CachedSecret {
  */
 export function createKeyVaultSecretStore(
   options: KeyVaultSecretStoreOptions,
-): SecretStore {
+): WritableSecretStore {
   const base = stripTrailingSlash(options.vaultUrl);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const now = options.now ?? Date.now;
@@ -193,15 +214,70 @@ export function createKeyVaultSecretStore(
   const cache = new Map<string, CachedSecret>();
   const inFlight = new Map<string, Promise<CachedSecret>>();
 
-  async function request(name: string): Promise<CachedSecret> {
-    const url = `${base}/secrets/${encodeURIComponent(name)}?api-version=${KEY_VAULT_API_VERSION}`;
+  function secretUrl(name: string): string {
+    return `${base}/secrets/${encodeURIComponent(name)}?api-version=${KEY_VAULT_API_VERSION}`;
+  }
+
+  async function bearer(name: string, verb: string): Promise<string> {
     const token = await options.getAccessToken();
     if (token.trim() === "") {
       throw new ImagineError(
         "auth_failed",
-        `The token provider returned an empty token for ${AZURE_KEY_VAULT_SCOPE}, so ${base} cannot be read.`,
+        `The token provider returned an empty token for ${AZURE_KEY_VAULT_SCOPE}, so secret "${name}" at ${base} cannot be ${verb}.`,
       );
     }
+    return token;
+  }
+
+  /**
+   * The write half. The body is never quoted back into an error: a failed PUT
+   * must not be the thing that puts a key into a log line.
+   */
+  async function write(
+    name: string,
+    method: "PUT" | "DELETE",
+    value?: string,
+  ): Promise<void> {
+    const token = await bearer(name, method === "PUT" ? "written" : "deleted");
+
+    let response: Response;
+    try {
+      response = await fetchImpl(secretUrl(name), {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          ...(value === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(value === undefined ? {} : { body: JSON.stringify({ value }) }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (cause) {
+      throw new ImagineError(
+        "provider_unavailable",
+        `Could not reach Key Vault at ${base} while writing secret "${name}": ${describe(cause)}`,
+        { cause, retryable: true },
+      );
+    }
+
+    // Deleting something that is not there leaves the world as the caller asked
+    // for it, so it is a success rather than a puzzle to explain on a web page.
+    if (method === "DELETE" && response.status === 404) {
+      await bodyText(response);
+      cache.delete(name);
+      return;
+    }
+
+    if (!response.ok)
+      throw vaultError(response.status, await bodyText(response), base, name);
+
+    await bodyText(response);
+    cache.delete(name);
+  }
+
+  async function request(name: string): Promise<CachedSecret> {
+    const url = secretUrl(name);
+    const token = await bearer(name, "read");
 
     let response: Response;
     try {
@@ -267,6 +343,14 @@ export function createKeyVaultSecretStore(
     invalidate(name?: string): void {
       if (name === undefined) cache.clear();
       else cache.delete(name);
+    },
+
+    set(name: string, value: string): Promise<void> {
+      return write(name, "PUT", value);
+    },
+
+    remove(name: string): Promise<void> {
+      return write(name, "DELETE");
     },
   };
 }

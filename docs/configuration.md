@@ -99,7 +99,7 @@ in any editor with JSON Schema support:
 | `providers.<id>.endpoint`    | Resource URL, for providers that need one. Required when `auth` is `entra`.                     |
 | `providers.<id>.api_version` | API version string. Azure defaults to `2025-04-01-preview`.                                    |
 | `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable, and needs a managed identity to run under. |
-| `providers.<id>.deployments` | Model id → deployment name mapping. Azure needs one entry per model you can reach.             |
+| `providers.<id>.deployments` | Model id → deployment mapping. Azure needs one entry per model you can reach. A plain string is the deployment name; an object `{ "deployment": …, "dialect": …, "endpoint": … }` also says which API the deployment speaks. |
 | `output.dir`                 | Where images are written. Relative paths resolve against the server's working directory.        |
 | `output.filename`            | Template over `{slug}`, `{hash}` and `{ext}`. Names a file, never a path.                      |
 | `output.manifest`            | JSONL log of every image. `null` falls back to `manifest.jsonl` inside the output directory.    |
@@ -199,6 +199,51 @@ name is arbitrary and is not the model id, which is why the mapping exists:
 Google and xAI are reserved: enabling either today gets you a `not_configured`
 entry saying no adapter is registered. See
 [ADR 0014](adr/0014-azure-openai-adapter.md).
+
+### Two kinds of Azure deployment
+
+One Azure resource can serve two different image APIs, and they do not agree on
+anything that matters for a request. GPT Image 2 puts the deployment name in the
+URL; Microsoft's own MAI-Image models put it in the request body, on a different
+host, with no API version and with a width and a height instead of a size. So a
+deployment entry can say which of the two it speaks:
+
+```json
+{
+  "providers": {
+    "azure": {
+      "enabled": true,
+      "auth": "entra",
+      "endpoint": "https://my-resource.openai.azure.com",
+      "deployments": {
+        "gpt-image-2": "my-gpt-image-2",
+        "mai-image-2.6": { "deployment": "mai-image-2-6", "dialect": "mai" }
+      }
+    }
+  }
+}
+```
+
+- **A plain string is the deployment name and means `"dialect": "openai"`** — the
+  GPT Image 2 shape. Every config written before this existed keeps working
+  exactly as it did.
+- **`"dialect": "mai"`** is for the MAI-Image models. The server derives the host
+  it needs from the endpoint you already configured, swapping
+  `my-resource.openai.azure.com` for `my-resource.services.ai.azure.com`. Set
+  `"endpoint"` on the entry only if your resource does not follow that pattern.
+- Under `"auth": "entra"` the two dialects need **different Entra audiences**, and
+  the server asks for the right one per call. The identity needs the **Cognitive
+  Services User** role for MAI in addition to the **Cognitive Services OpenAI
+  User** role for GPT Image 2.
+
+Two things about MAI are worth knowing before you route work to it. It produces
+**one image per call** and caps the output at about a megapixel, so a requested
+`1536x1024` is shrunk to the largest same-shape size that fits (`1248x832`) and
+the result reports the size that actually came back. And a capacity-1 deployment
+is quota'd in **requests per minute**, in the low single digits — enough for a
+person, not for a batch.
+
+See [ADR 0027](adr/0027-the-mai-image-wire-dialect.md).
 
 ### Azure OpenAI without a key at all
 

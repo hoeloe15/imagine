@@ -1,9 +1,24 @@
 # 14. The Azure OpenAI adapter
 
-**Status:** accepted
+**Status:** accepted, amended by
+[ADR 0027](0027-the-mai-image-wire-dialect.md)
 **Date:** 2026-08-27
 **Follows:** [ADR 0009](0009-openrouter-adapter.md),
 [ADR 0013](0013-explicit-model-ref-at-the-adapter-seam.md)
+
+> **Amendment, 2026-09-04 (ADR 0027).** Everything below still describes the
+> Azure OpenAI wire shape exactly, but it is no longer the *only* shape the
+> adapter speaks. Microsoft's MAI-Image models live in the same Azure resource
+> behind a different API, and that API requires the deployment name **in the
+> request body as `model`** — the precise opposite of the rule this ADR was
+> written to protect. The adapter therefore has a wire-dialect seam: `openai`
+> (this ADR) and `mai` (ADR 0027). Two things stated here have moved with it:
+> `providers.azure.deployments` values are now `string | { deployment, dialect?,
+> endpoint? }`, where a bare string still means the `openai` dialect described
+> below; and the Entra scope is no longer one constant per file but a parameter
+> of the token provider, because the two endpoints accept different audiences.
+> The LiteLLM warning is unchanged and undiluted — it is a rule about *this*
+> API, not about Azure in general.
 
 ## Context
 

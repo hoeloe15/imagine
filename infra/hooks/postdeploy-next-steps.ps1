@@ -108,6 +108,49 @@ if ($authEnabled -and $issuerMode) {
 
 Write-Host ''
 
+$portalEnabled = (Get-AzdValue 'IMAGINE_PORTAL_ENABLED') -eq 'true'
+$portalUrl = Get-AzdValue 'PORTAL_URL'
+if (-not $portalUrl) { $portalUrl = "${endpoint}/portal" }
+$portalRedirect = Get-AzdValue 'PORTAL_REDIRECT_URI'
+if (-not $portalRedirect) { $portalRedirect = "${portalUrl}/auth/callback" }
+$portalClientId = Get-AzdValue 'IMAGINE_PORTAL_WORKOS_CLIENT_ID'
+
+if ($portalEnabled -and $authEnabled) {
+    Write-Host "  Portal: $portalUrl"
+    Write-Host '  Sign in there in a browser and paste a provider key in. No terminal,'
+    Write-Host '  no redeploy. Three things must be registered at the issuer or the'
+    Write-Host '  login fails, and the first two are matched character for character:'
+    Write-Host ''
+    Write-Host "      Redirect URI:       $portalRedirect"
+    Write-Host "      Logout return URI:  $portalUrl"
+    Write-Host "      Resource indicator: $portalUrl"
+    if ($portalClientId) {
+        Write-Host ''
+        Write-Host "  Client id in use: $portalClientId"
+    }
+    if (-not (Get-AzdValue 'IMAGINE_ALLOWED_SUBJECTS')) {
+        Write-Host ''
+        Write-Host '  !! IMAGINE_ALLOWED_SUBJECTS is empty, so every account the issuer'
+        Write-Host '  !! signs in can reach this page and replace your provider keys.'
+        Write-Host '  !! Set it before you share the URL with anyone:'
+        Write-Host '  !!     azd env set IMAGINE_ALLOWED_SUBJECTS "email:you@example.com"'
+        Write-Host '  !!     azd up'
+    }
+} elseif ($portalEnabled) {
+    Write-Host '  Portal: switched on, but authentication is off, so its paths answer'
+    Write-Host '  404. A page that writes keys does not run without a login. Turn'
+    Write-Host '  authentication on, or unset IMAGINE_PORTAL_ENABLED.'
+} else {
+    Write-Host '  Portal: off. Turn it on to set provider keys from a browser instead'
+    Write-Host '  of the command below. Needs authentication on first.'
+    Write-Host '      azd env set IMAGINE_PORTAL_ENABLED true'
+    Write-Host '      azd env set IMAGINE_PORTAL_WORKOS_CLIENT_ID <client id from the issuer>'
+    Write-Host '      azd up'
+    Write-Host '  Runbook section 6h.'
+}
+
+Write-Host ''
+
 Write-Host '  OpenRouter: the server reads the key from Key Vault itself, at the'
 Write-Host '  moment a call needs it. One command, no redeploy, live within a minute:'
 Write-Host ''

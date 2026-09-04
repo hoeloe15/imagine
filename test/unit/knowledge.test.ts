@@ -57,12 +57,13 @@ describe("bundled data/models.json", () => {
     expect(knowledge.disclaimer).toMatch(/indicative/i);
   });
 
-  it("contains the four v1 models", () => {
+  it("contains the curated models", () => {
     expect(knowledge.models.map((model) => model.id)).toEqual([
       "gpt-image-2",
       "gemini-3.1-flash-image",
       "grok-imagine-image-2.0",
       "flux-2-pro",
+      "mai-image-2.6",
     ]);
   });
 
@@ -80,7 +81,12 @@ describe("bundled data/models.json", () => {
     expect(bestModelForUseCase(knowledge, "text_in_image")?.model.id).toBe(
       "gpt-image-2",
     );
-    expect(bestModelForUseCase(knowledge, "photoreal")?.model.id).toBe("flux-2-pro");
+    /**
+     * MAI-Image 2.6 and FLUX 2 Pro both score 5 here, and the tie breaks on
+     * price. Which of the two deserves the 5 is issue #59's open question; see
+     * the note in `flux-2-pro`.
+     */
+    expect(bestModelForUseCase(knowledge, "photoreal")?.model.id).toBe("mai-image-2.6");
     expect(bestModelForUseCase(knowledge, "illustration")?.model.id).toBe(
       "gemini-3.1-flash-image",
     );
@@ -89,10 +95,23 @@ describe("bundled data/models.json", () => {
     );
   });
 
-  it("is reachable through OpenRouter for every model, per the MVP plan", () => {
+  it("is reachable through OpenRouter for every model OpenRouter carries", () => {
+    /**
+     * MAI-Image is the first curated model that exists only inside an Azure
+     * resource: OpenRouter does not resell it, so "everything is reachable
+     * through OpenRouter" stopped being true with issue #59.
+     */
     for (const model of knowledge.models) {
+      if (model.id === "mai-image-2.6") continue;
       expect(availabilityFor(model, { providers: ["openrouter"] })).toBeDefined();
     }
+  });
+
+  it("reaches the Azure-only model through Azure and nowhere else", () => {
+    const model = findModel(knowledge, "mai-image-2.6");
+
+    expect(model?.availability.map((entry) => entry.provider)).toEqual(["azure"]);
+    expect(availabilityFor(model!, { providers: ["openrouter"] })).toBeUndefined();
   });
 
   it("matches the shape schema/models.schema.json documents", () => {
@@ -113,7 +132,7 @@ describe("bundled data/models.json", () => {
 
 describe("loadModelKnowledgeFrom", () => {
   it("reads and validates a file from disk", () => {
-    expect(loadModelKnowledgeFrom(bundledModelsPath()).models).toHaveLength(4);
+    expect(loadModelKnowledgeFrom(bundledModelsPath()).models).toHaveLength(5);
   });
 
   it("rejects a missing file", () => {
@@ -196,7 +215,7 @@ describe("queries restricted to configured providers", () => {
       (selection) => selection.model.id,
     );
 
-    expect(ids).toEqual(["gpt-image-2"]);
+    expect(ids).toEqual(["gpt-image-2", "mai-image-2.6"]);
   });
 
   it("returns nothing when no provider is configured", () => {
@@ -214,6 +233,7 @@ describe("queries restricted to configured providers", () => {
     ).toEqual([
       "grok-imagine-image-2.0",
       "gemini-3.1-flash-image",
+      "mai-image-2.6",
       "flux-2-pro",
       "gpt-image-2",
     ]);
@@ -224,6 +244,7 @@ describe("queries restricted to configured providers", () => {
 
     expect(ranked.map((selection) => selection.model.id)).toEqual([
       "gpt-image-2",
+      "mai-image-2.6",
       "flux-2-pro",
       "grok-imagine-image-2.0",
       "gemini-3.1-flash-image",

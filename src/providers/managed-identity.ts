@@ -11,11 +11,14 @@
 
 import { ImagineError } from "../core/errors.js";
 import type { Env } from "../core/config.js";
-import {
-  AZURE_ENTRA_SCOPE,
-  type AccessTokenProvider,
-  type FetchLike,
-} from "./azure.js";
+/**
+ * The scope is bound when the provider is built, so what comes back takes no
+ * arguments — unlike `azure.ts`'s `AccessTokenProvider`, which is handed a scope
+ * per call because the two Azure wire dialects want different audiences
+ * (ADR 0027).
+ */
+import type { AccessTokenProvider } from "../core/secrets.js";
+import { AZURE_ENTRA_SCOPE, type FetchLike } from "./azure.js";
 
 export const IDENTITY_ENDPOINT_ENV = "IDENTITY_ENDPOINT";
 export const IDENTITY_HEADER_ENV = "IDENTITY_HEADER";

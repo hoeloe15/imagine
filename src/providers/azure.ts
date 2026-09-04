@@ -1,14 +1,23 @@
 /**
- * The Azure OpenAI adapter: `gpt-image` inside a customer's own Azure resource.
+ * The Azure adapter: image models inside a customer's own Azure resource.
  *
- * The one detail this whole file exists to get right: **the deployment name
- * lives in the URL path and never in the request body.** Putting it in the body
- * as `model` is the failure that broke LiteLLM repeatedly (research §2 and §5),
- * so `test/contract/azure-request.test.ts` asserts both halves of that.
+ * One resource, two wire dialects, and they disagree about the single most
+ * error-prone detail in the whole file:
+ *
+ * - `openai` — `gpt-image` on Azure OpenAI. **The deployment name lives in the
+ *   URL path and never in the request body.** Putting it in the body as `model`
+ *   is the failure that broke LiteLLM repeatedly (research §2 and §5).
+ * - `mai` — Microsoft's own MAI-Image models on Foundry. **The deployment name
+ *   lives in the body as `model` and never in the URL path**, there is no
+ *   `api-version`, and the size is a `width`/`height` pair inside a fixed pixel
+ *   budget (`mai-image-2026-09.md` §1).
+ *
+ * The rule is per-API, not per-vendor, which is exactly why it is easy to lose.
+ * `test/contract/azure-request.test.ts` pins both halves of both dialects as
+ * mirror images of each other. See ADR 0014 and ADR 0027.
  *
  * Deployment names are arbitrary and are not model ids, so the mapping comes
- * from `providers.azure.deployments` in config. See ADR 0014 for the choices
- * that were not obvious.
+ * from `providers.azure.deployments` in config.
  */
 
 import { ImagineError, type FailureReason } from "../core/errors.js";
@@ -28,8 +37,23 @@ import type { ImageProvider, ResolvedModel } from "./types.js";
 
 export const AZURE_ID = "azure";
 export const AZURE_DEFAULT_API_VERSION = "2025-04-01-preview";
-/** The scope an Entra token has to be issued for (research §2). */
+/** The scope an Entra token for Azure OpenAI has to be issued for (research §2). */
 export const AZURE_ENTRA_SCOPE = "https://ai.azure.com/.default";
+/**
+ * The scope the MAI endpoint wants instead. Microsoft's own docs name it twice
+ * — in the bearer-token example and in the 401 troubleshooting row — and a live
+ * call on 2026-09-04 confirmed it (`mai-image-2026-09.md` §1.5).
+ */
+export const AZURE_MAI_ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default";
+
+/** The MAI host suffix. The `openai.azure.com` host answers 404 for this path. */
+export const AZURE_MAI_HOST_SUFFIX = "services.ai.azure.com";
+/** No `api-version`: the `v1` in the path is the version (`mai-image-2026-09.md` §1.1). */
+export const AZURE_MAI_PATH = "/mai/v1/images/generations";
+
+/** MAI takes free width/height integers inside a fixed budget, not a size string. */
+export const MAI_MIN_SIDE = 768;
+export const MAI_MAX_AREA = 1_048_576;
 
 const DEFAULT_GENERATE_TIMEOUT_MS = 120_000;
 
@@ -37,11 +61,33 @@ export type FetchLike = typeof globalThis.fetch;
 export type AzureAuthMode = "api_key" | "entra";
 
 /**
- * Supplies an Entra bearer token. Injected rather than acquired here (ADR 0014);
- * `managed-identity.ts` is the implementation the composition root wires when
- * the platform provides an identity (ADR 0022).
+ * Which wire shape a deployment speaks. `openai` is the Azure OpenAI images API;
+ * `mai` is Microsoft's MAI-Image API on the Foundry host. See ADR 0027.
  */
-export type AccessTokenProvider = () => Promise<string>;
+export type AzureWireDialect = "openai" | "mai";
+
+/**
+ * How one entry in `providers.azure.deployments` may be written. A bare string
+ * is the original form and still means "the openai dialect", so nothing that
+ * worked before this seam existed has to change (ADR 0014, amended).
+ */
+export type AzureDeploymentConfig =
+  | string
+  | {
+      deployment: string;
+      dialect?: AzureWireDialect;
+      /** Overrides the host derived from `endpoint` for this deployment only. */
+      endpoint?: string;
+    };
+
+/**
+ * Supplies an Entra bearer token for the scope it is asked for. Injected rather
+ * than acquired here (ADR 0014); `managed-identity.ts` is the implementation the
+ * composition root wires when the platform provides an identity (ADR 0022). The
+ * scope is a parameter and not a constant because the two dialects want
+ * different audiences (ADR 0027).
+ */
+export type AccessTokenProvider = (scope: string) => Promise<string>;
 
 export interface AzureProviderOptions {
   /** Mirrors `providers.azure.enabled`; a disabled adapter is unconfigured. */
@@ -55,8 +101,8 @@ export interface AzureProviderOptions {
    * at request time, so a rotated key is picked up without a restart (ADR 0026).
    */
   apiKey?: ApiKeyOption;
-  /** Curated model id → deployment name, from `providers.azure.deployments`. */
-  deployments?: Readonly<Record<string, string>>;
+  /** Curated model id → deployment, from `providers.azure.deployments`. */
+  deployments?: Readonly<Record<string, AzureDeploymentConfig>>;
   /** Only read in `entra` mode. */
   getAccessToken?: AccessTokenProvider;
   fetch?: FetchLike;
@@ -67,8 +113,28 @@ export interface AzureProviderOptions {
 interface Deployment {
   /** The curated model id the deployment was found under. */
   model: string;
-  /** The name that goes in the URL path. */
+  /** The deployment name — in the URL path for `openai`, in the body for `mai`. */
   name: string;
+  dialect: AzureWireDialect;
+  /** Set only when the entry overrode the host. */
+  endpoint: string | undefined;
+}
+
+/**
+ * A bare string is the `openai` dialect, which is what every config written
+ * before ADR 0027 says.
+ */
+function normaliseDeployment(model: string, value: AzureDeploymentConfig): Deployment {
+  if (typeof value === "string") {
+    return { model, name: value, dialect: "openai", endpoint: undefined };
+  }
+  return {
+    model,
+    name: value.deployment,
+    dialect: value.dialect ?? "openai",
+    endpoint:
+      value.endpoint === undefined ? undefined : stripTrailingSlash(value.endpoint),
+  };
 }
 
 export class AzureProvider implements ImageProvider {
@@ -79,7 +145,7 @@ export class AzureProvider implements ImageProvider {
   readonly #apiVersion: string;
   readonly #auth: AzureAuthMode;
   readonly #apiKey: ApiKeySource;
-  readonly #deployments: Readonly<Record<string, string>>;
+  readonly #deployments: Readonly<Record<string, Deployment>>;
   readonly #getAccessToken: AccessTokenProvider | undefined;
   readonly #fetch: FetchLike;
   readonly #generateTimeoutMs: number;
@@ -94,7 +160,12 @@ export class AzureProvider implements ImageProvider {
     this.#apiVersion = options.apiVersion ?? AZURE_DEFAULT_API_VERSION;
     this.#auth = options.auth ?? "entra";
     this.#apiKey = toApiKeySource(options.apiKey);
-    this.#deployments = { ...(options.deployments ?? {}) };
+    this.#deployments = Object.fromEntries(
+      Object.entries(options.deployments ?? {}).map(([model, value]) => [
+        model,
+        normaliseDeployment(model, value),
+      ]),
+    );
     this.#getAccessToken = options.getAccessToken;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#generateTimeoutMs = options.generateTimeoutMs ?? DEFAULT_GENERATE_TIMEOUT_MS;
@@ -117,14 +188,15 @@ export class AzureProvider implements ImageProvider {
    */
   listModels(): Promise<ProviderModel[]> {
     return Promise.resolve(
-      Object.entries(this.#deployments).map(([model, deployment]) => ({
-        id: model,
-        display_name: model,
+      Object.values(this.#deployments).map((deployment) => ({
+        id: deployment.model,
+        display_name: deployment.model,
         capabilities: {
-          deployment,
-          api_version: this.#apiVersion,
+          deployment: deployment.name,
+          dialect: deployment.dialect,
+          ...(deployment.dialect === "mai" ? {} : { api_version: this.#apiVersion }),
           source: "config",
-          note: `Served by the Azure deployment "${deployment}", as configured in providers.${AZURE_ID}.deployments.`,
+          note: `Served by the Azure deployment "${deployment.name}", as configured in providers.${AZURE_ID}.deployments.`,
         },
       })),
     );
@@ -138,12 +210,24 @@ export class AzureProvider implements ImageProvider {
     const deployment = this.#resolveDeployment(resolved);
 
     const payload = await this.#send(
-      deployment.name,
-      JSON.stringify(buildGenerateBody(request)),
+      deployment,
+      JSON.stringify(
+        deployment.dialect === "mai"
+          ? buildMaiGenerateBody(request, deployment.name)
+          : buildGenerateBody(request),
+      ),
     );
 
     const bytes = decodeBase64(firstImage(payload));
-    const dimensions = imageDimensions(bytes) ?? requestedDimensions(request.size);
+    /**
+     * The header is the truth: MAI is asked for a clamped size and gpt-image for
+     * a named one, and neither promises to honour it exactly.
+     */
+    const dimensions =
+      imageDimensions(bytes) ??
+      (deployment.dialect === "mai"
+        ? maiDimensions(request.size)
+        : requestedDimensions(request.size));
 
     return {
       bytes,
@@ -173,19 +257,19 @@ export class AzureProvider implements ImageProvider {
     const entries = Object.entries(this.#deployments);
 
     if (resolved !== undefined) {
-      const name = this.#deployments[resolved.model_ref];
-      if (name === undefined) {
+      const deployment = this.#deployments[resolved.model_ref];
+      if (deployment === undefined) {
         throw new ImagineError(
           "invalid_request",
           `No Azure deployment is configured for model "${resolved.model_ref}". Add providers.${AZURE_ID}.deployments["${resolved.model_ref}"] with the name of your deployment${describeKnown(entries)}.`,
         );
       }
-      return { model: resolved.model_ref, name };
+      return deployment;
     }
 
     const only = entries[0];
     if (entries.length === 1 && only !== undefined) {
-      return { model: only[0], name: only[1] };
+      return only[1];
     }
 
     throw new ImagineError(
@@ -196,7 +280,7 @@ export class AzureProvider implements ImageProvider {
     );
   }
 
-  async #send(deployment: string, body: string): Promise<Record<string, unknown>> {
+  async #send(deployment: Deployment, body: string): Promise<Record<string, unknown>> {
     if (!this.#enabled) {
       throw new ImagineError(
         "invalid_request",
@@ -213,12 +297,15 @@ export class AzureProvider implements ImageProvider {
     }
 
     const headers = {
-      ...(await this.#authHeader()),
+      ...(await this.#authHeader(entraScopeFor(deployment.dialect))),
       Accept: "application/json",
       "Content-Type": "application/json",
     };
 
-    const url = `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/images/generations?api-version=${encodeURIComponent(this.#apiVersion)}`;
+    const url =
+      deployment.dialect === "mai"
+        ? `${maiHost(deployment, endpoint)}${AZURE_MAI_PATH}`
+        : `${deployment.endpoint ?? endpoint}/openai/deployments/${encodeURIComponent(deployment.name)}/images/generations?api-version=${encodeURIComponent(this.#apiVersion)}`;
 
     let response: Response;
     try {
@@ -235,7 +322,7 @@ export class AzureProvider implements ImageProvider {
     const raw = await readBodyText(response);
     const parsed = parseJson(raw);
 
-    if (!response.ok) throw httpError(response.status, parsed, raw, deployment);
+    if (!response.ok) throw httpError(response.status, parsed, raw, deployment.name);
 
     if (parsed === null) {
       throw new ImagineError(
@@ -247,7 +334,7 @@ export class AzureProvider implements ImageProvider {
     return parsed;
   }
 
-  async #authHeader(): Promise<Record<string, string>> {
+  async #authHeader(scope: string): Promise<Record<string, string>> {
     if (this.#auth === "api_key") {
       const apiKey = await this.#apiKey.get();
       if (apiKey === null || apiKey.length === 0) {
@@ -263,16 +350,16 @@ export class AzureProvider implements ImageProvider {
     if (getAccessToken === undefined) {
       throw new ImagineError(
         "auth_failed",
-        `providers.${AZURE_ID}.auth is "entra" but this adapter was constructed without a token provider, so there is no way to obtain a bearer token for ${AZURE_ENTRA_SCOPE}.`,
+        `providers.${AZURE_ID}.auth is "entra" but this adapter was constructed without a token provider, so there is no way to obtain a bearer token for ${scope}.`,
       );
     }
 
-    const token = await getAccessToken().catch((cause: unknown) => {
+    const token = await getAccessToken(scope).catch((cause: unknown) => {
       throw cause instanceof ImagineError
         ? cause
         : new ImagineError(
             "auth_failed",
-            `Could not obtain an Entra token for ${AZURE_ENTRA_SCOPE}: ${describe(cause)}`,
+            `Could not obtain an Entra token for ${scope}: ${describe(cause)}`,
             { cause },
           );
     });
@@ -280,12 +367,111 @@ export class AzureProvider implements ImageProvider {
     if (token.length === 0) {
       throw new ImagineError(
         "auth_failed",
-        `The Entra token provider returned an empty token for ${AZURE_ENTRA_SCOPE}.`,
+        `The Entra token provider returned an empty token for ${scope}.`,
       );
     }
 
     return { Authorization: `Bearer ${token}` };
   }
+}
+
+/** Which Entra audience the dialect's endpoint accepts (`mai-image-2026-09.md` §1.5). */
+export function entraScopeFor(dialect: AzureWireDialect): string {
+  return dialect === "mai" ? AZURE_MAI_ENTRA_SCOPE : AZURE_ENTRA_SCOPE;
+}
+
+/**
+ * MAI lives on a different host of the same resource. Rather than make every
+ * operator configure a second endpoint, the resource name is taken from the one
+ * they already configured and the suffix is swapped — `my-resource.openai.azure.com`
+ * becomes `my-resource.services.ai.azure.com`. An explicit `endpoint` on the
+ * deployment entry wins, for the resource whose host does not follow the pattern.
+ */
+export function maiHost(deployment: Deployment, fallback: string): string {
+  if (deployment.endpoint !== undefined) return deployment.endpoint;
+  return maiHostFor(fallback);
+}
+
+export function maiHostFor(endpoint: string): string {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return endpoint;
+  }
+  if (url.hostname.endsWith(AZURE_MAI_HOST_SUFFIX))
+    return stripTrailingSlash(url.origin);
+  const resource = url.hostname.split(".")[0] ?? url.hostname;
+  url.hostname = `${resource}.${AZURE_MAI_HOST_SUFFIX}`;
+  return stripTrailingSlash(url.origin);
+}
+
+/**
+ * The mirror image of `buildGenerateBody`: here `model` is *required* and is the
+ * deployment name, there is no `n` and no `size`, and the dimensions are
+ * integers inside the pixel budget (`mai-image-2026-09.md` §1.2).
+ */
+function buildMaiGenerateBody(
+  request: NormalisedRequest,
+  deployment: string,
+): Record<string, unknown> {
+  const { width, height } = maiDimensions(request.size);
+  return {
+    model: deployment,
+    prompt: promptWithStyle(request),
+    width,
+    height,
+  };
+}
+
+/**
+ * `ImageSize` to a legal MAI width/height. The budget is `width × height ≤
+ * 1,048,576` with each side ≥ 768, so `1024x1024` fits exactly and the
+ * landscape and portrait sizes do not: `1536x1024` is 1,572,864 pixels and has
+ * to shrink. Shrinking keeps the aspect ratio and lands on a multiple of eight,
+ * which is what the endpoint returns for these shapes anyway; `auto` and an
+ * absent size mean the square.
+ */
+export function maiDimensions(size: ImageSize | undefined): {
+  width: number;
+  height: number;
+} {
+  const requested = requestedDimensions(size);
+  return clampToMaiBudget(
+    requested.width > 0 ? requested.width : 1024,
+    requested.height > 0 ? requested.height : 1024,
+  );
+}
+
+function clampToMaiBudget(
+  requestedWidth: number,
+  requestedHeight: number,
+): { width: number; height: number } {
+  let width = requestedWidth;
+  let height = requestedHeight;
+
+  const area = width * height;
+  if (area > MAI_MAX_AREA) {
+    const scale = Math.sqrt(MAI_MAX_AREA / area);
+    width = Math.max(MAI_MIN_SIDE, floorToEight(width * scale));
+    height = Math.max(MAI_MIN_SIDE, floorToEight(height * scale));
+  }
+
+  /** The floor wins over the aspect ratio: below it the request is simply illegal. */
+  width = Math.max(MAI_MIN_SIDE, width);
+  height = Math.max(MAI_MIN_SIDE, height);
+
+  /** Raising a side can push the area back over the cap. Trim the longer one. */
+  if (width * height > MAI_MAX_AREA) {
+    if (width >= height) width = floorToEight(MAI_MAX_AREA / height);
+    else height = floorToEight(MAI_MAX_AREA / width);
+  }
+
+  return { width, height };
+}
+
+function floorToEight(value: number): number {
+  return Math.floor(value / 8) * 8;
 }
 
 /**
@@ -468,7 +654,7 @@ function sniffMimeType(bytes: Uint8Array): string | undefined {
   )?.mime;
 }
 
-function describeKnown(entries: readonly (readonly [string, string])[]): string {
+function describeKnown(entries: readonly (readonly [string, Deployment])[]): string {
   if (entries.length === 0) return "";
   return ` (configured today: ${entries.map(([model]) => model).join(", ")})`;
 }

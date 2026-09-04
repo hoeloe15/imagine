@@ -196,6 +196,76 @@ toggle in someone else's web app is not safe — the same argument
 for validating tokens in-app. The reasoning is in
 [ADR 0025](adr/0025-membership-allowlist.md).
 
+## The portal: a page for setting provider keys
+
+Everything above configures the server from outside it — variables, a vault, a
+deployment. The portal is the other half: **one web page, at the same URL and
+behind the same login, where a provider key goes in.** Open
+`https://<host>/portal` in a browser, sign in with the same account your chat
+client uses, paste a key, and the next `generate_image` uses it — within a
+minute, with no redeploy.
+
+```sh
+IMAGINE_PORTAL_ENABLED=true
+IMAGINE_PORTAL_WORKOS_CLIENT_ID=client_01HB...
+IMAGINE_PUBLIC_URL=https://imagine.example.com
+```
+
+| Variable | What it is |
+| --- | --- |
+| `IMAGINE_PORTAL_ENABLED` | Off unless set. On, and the routes exist — but only if authentication is on too |
+| `IMAGINE_PORTAL_WORKOS_CLIENT_ID` | The public client id of the portal's application at your issuer. Required when the portal is on |
+| `IMAGINE_PORTAL_SESSION_SECRET` | Optional. Signs the session cookie. Unset means a key that is random per process, so a restart asks for a fresh login |
+| `IMAGINE_PORTAL_AUTHORIZE_URL` | Optional. Defaults to WorkOS AuthKit's `/user_management/authorize` |
+| `IMAGINE_PORTAL_TOKEN_URL` | Optional. Defaults to WorkOS AuthKit's `/user_management/authenticate` |
+| `IMAGINE_PORTAL_LOGOUT_URL` | Optional. Defaults to WorkOS AuthKit's session logout; blank turns the redirect off |
+| `IMAGINE_PORTAL_PUBLIC_URL` | Optional. Where the redirect URI is built from, if `IMAGINE_PUBLIC_URL` is not the right origin |
+
+Register at your issuer, matched character for character:
+`https://<host>/portal/auth/callback` as the redirect URI, and
+`https://<host>/portal` as both the logout return URI and the portal's own
+resource indicator.
+
+**Authentication is not optional for it.** With no `IMAGINE_AUTH_*` set, the
+portal paths are not routes at all — a plain `404`, and a warning in the startup
+banner. There is no "it is only on localhost" mode, because the deployed default
+must not depend on anyone remembering to turn something on.
+
+**It writes to Key Vault, so it needs to be allowed to.** Hosted, that is the
+Key Vault Secrets Officer role on the container's managed identity, which the
+azd template assigns. Without a vault the page still shows what is configured
+and says plainly that it cannot save anything.
+
+**What the page will never do:**
+
+- Show you a key. The field is write-only; the page reports presence, source
+  (`vault` or `env`) and the *name* of the vault secret. No last-four, no length,
+  no masked preview, and no route returns a value in any shape.
+- Change anything on a `GET`. Every write is a `POST` carrying a per-session CSRF
+  token compared in constant time, with an `Origin` / `Sec-Fetch-Site` check in
+  front of it.
+- Accept a session over plain HTTP. A cookie is only issued over HTTPS, or on
+  loopback so the thing stays testable and runnable locally.
+- Read an `Authorization` header. `/portal` reads the session cookie and nothing
+  else, and `/mcp` reads the header and ignores cookies entirely. A browser
+  session can never make a tool call cross-site, and a leaked bearer token can
+  never write a secret.
+
+**The allowlist covers it too.** `IMAGINE_ALLOWED_SUBJECTS` is applied to a
+portal login exactly as it is to a tool call — an account that is not on it gets
+a `403` that explains itself, not a login loop.
+
+**Every write leaves one audit line** with the caller, the action, the secret's
+*name*, and the outcome. Hosted, that goes to the container log stream, which is
+shipped to Log Analytics and survives the revision that empties the filesystem.
+Locally it is also appended to `audit.jsonl` beside the cost log. That log stream
+is a stopgap until there is a durable store, and it is written down as one rather
+than sold as a design.
+
+**A key is never accepted as an MCP tool argument**, and it never will be: a key
+pasted into a chat is a key in a transcript. This page existing is what makes it
+possible to say that.
+
 ## Telling Claude where to log in
 
 A `401` on its own says "go away", not "go here". So with authentication on, the

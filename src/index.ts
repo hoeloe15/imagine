@@ -20,6 +20,12 @@ import {
   protectedResourceFromEnv,
   type ProtectedResource,
 } from "./transport/protected-resource.js";
+import { createPortal } from "./portal/portal.js";
+import {
+  portalSettingsFromEnv,
+  PORTAL_PATH,
+  type PortalSettings,
+} from "./portal/settings.js";
 import { version } from "./version.js";
 
 if (httpRequested(process.argv.slice(2), process.env)) {
@@ -36,16 +42,42 @@ async function serveHttp(): Promise<void> {
   const resource = protectedResourceFromEnv(process.env, auth, { mcpPath: MCP_PATH });
   const dependencies = await buildDependencies();
 
+  const authenticate = auth ? createAuthenticator(auth) : undefined;
+  const authorise = allowlist ? createAuthoriser(allowlist) : undefined;
+
+  const portalConfiguration = portalSettingsFromEnv(process.env, auth);
+  const portal =
+    portalConfiguration.enabled && auth
+      ? createPortal({
+          settings: portalConfiguration.settings,
+          config: dependencies.config,
+          secrets: dependencies.secrets,
+          auth,
+          ...(dependencies.vault ? { vault: dependencies.vault } : {}),
+          ...(authenticate ? { authenticate } : {}),
+          ...(authorise ? { authorise } : {}),
+        })
+      : undefined;
+
   const running = await startHttpServer({
     ...settings,
-    ...(auth ? { authenticate: createAuthenticator(auth) } : {}),
-    ...(allowlist ? { authorise: createAuthoriser(allowlist) } : {}),
+    ...(authenticate ? { authenticate } : {}),
+    ...(authorise ? { authorise } : {}),
     ...(resource ? { protectedResource: resource } : {}),
+    ...(portal ? { portal } : {}),
     createServer: () => createServer(dependencies),
   });
 
   process.stderr.write(
-    banner(running, settings.allowedOrigins, auth, allowlist, resource),
+    banner(
+      running,
+      settings.allowedOrigins,
+      auth,
+      allowlist,
+      resource,
+      portalConfiguration.enabled ? portalConfiguration.settings : null,
+      portalConfiguration.enabled ? null : portalConfiguration.warning,
+    ),
   );
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -61,6 +93,8 @@ function banner(
   auth: AuthSettings | null,
   allowlist: Allowlist | null,
   resource: ProtectedResource | null,
+  portal: PortalSettings | null,
+  portalWarning: string | null,
 ): string {
   const origins =
     allowedOrigins.length === 0
@@ -83,9 +117,28 @@ function banner(
     ...(auth === null
       ? unauthenticatedNotice()
       : [...authenticatedNotice(auth, allowlist), ...discoveryNotice(resource)]),
+    ...portalNotice(portal, portalWarning),
     exposure,
     "",
   ].join("\n");
+}
+
+function portalNotice(portal: PortalSettings | null, warning: string | null): string[] {
+  if (warning !== null) {
+    return ["", `  !! ${warning}`];
+  }
+  if (portal === null) return [];
+
+  return [
+    "",
+    `  PORTAL: ${portal.resource}  (browser login, session cookie only)`,
+    `  redirect URI:    ${portal.redirectUri}  — register this exactly`,
+    `  client id:       ${portal.clientId}`,
+    portal.sessionSecret === null
+      ? "  session key:     random for this process, so a new revision or replica means a new login"
+      : "  session key:     from IMAGINE_PORTAL_SESSION_SECRET, so sessions survive a revision",
+    `  ${PORTAL_PATH} ignores Authorization headers, and ${MCP_PATH} ignores cookies.`,
+  ];
 }
 
 function unauthenticatedNotice(): string[] {

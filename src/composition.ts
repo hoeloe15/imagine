@@ -27,12 +27,11 @@ import {
   createKeyVaultSecretStore,
   createSecretResolver,
   type SecretResolver,
-  type SecretStore,
+  type WritableSecretStore,
 } from "./core/secrets.js";
 import {
   AZURE_ID,
   AzureProvider,
-  AZURE_ENTRA_SCOPE,
   type AccessTokenProvider,
 } from "./providers/azure.js";
 import {
@@ -58,19 +57,40 @@ export interface BuildOptions extends LoadConfigOptions {
   secrets?: SecretResolver;
 }
 
+/**
+ * Everything the MCP server needs, plus the one thing only the portal does: the
+ * Key Vault itself, which the portal writes a provider key into. It is the same
+ * store instance the resolver reads through, so a write invalidates the cache
+ * the very next `list_capabilities` on this replica consults.
+ */
+export interface ImagineDependencies extends ServerDependencies {
+  /** Always constructed here, so the portal never has to build a second one. */
+  secrets: SecretResolver;
+  /** Present only where a vault and a managed identity are both configured. */
+  vault?: WritableSecretStore;
+}
+
 export async function buildDependencies(
   options: BuildOptions = {},
-): Promise<ServerDependencies> {
+): Promise<ImagineDependencies> {
   const { providers, ledger, sink, secrets, ...configOptions } = options;
   const loaded = loadConfig(configOptions);
   const { config } = loaded;
   const outputSink = sink ?? blobSink(loaded);
-  const resolver = secrets ?? secretResolver(loaded);
+  const vault = keyVaultStore(loaded.env);
+  const resolver =
+    secrets ??
+    createSecretResolver({
+      config,
+      env: loaded.env,
+      ...(vault === undefined ? {} : { vault }),
+    });
 
   return {
     config,
     env: loaded.env,
     secrets: resolver,
+    ...(vault === undefined ? {} : { vault }),
     ...(outputSink === undefined ? {} : { sink: outputSink }),
     knowledge: loadBundledModelKnowledge(),
     ledger:
@@ -91,19 +111,10 @@ export async function buildDependencies(
  * into Key Vault becomes usable without a redeploy (ADR 0026).
  *
  * Without `IMAGINE_KEY_VAULT_URL`, or without an identity to read that vault
- * with, this is an environment-only resolver: exactly the behaviour every
- * local installation has always had.
+ * with, this is `undefined` and the resolver reads the environment and nothing
+ * else: exactly the behaviour every local installation has always had.
  */
-function secretResolver(loaded: ReturnType<typeof loadConfig>): SecretResolver {
-  const vault = keyVaultStore(loaded.env);
-  return createSecretResolver({
-    config: loaded.config,
-    env: loaded.env,
-    ...(vault === undefined ? {} : { vault }),
-  });
-}
-
-function keyVaultStore(env: Env): SecretStore | undefined {
+function keyVaultStore(env: Env): WritableSecretStore | undefined {
   const vaultUrl = env[KEY_VAULT_URL_ENV]?.trim();
   if (!vaultUrl || !hasManagedIdentity(env)) return undefined;
 
@@ -175,16 +186,29 @@ function azureProvider(
  * cannot show. See ADR 0014 and ADR 0022.
  */
 function entraTokenProvider(env: Env): AccessTokenProvider {
-  return hasManagedIdentity(env)
-    ? createManagedIdentityTokenProvider({ env, scope: AZURE_ENTRA_SCOPE })
-    : noManagedIdentity;
+  if (!hasManagedIdentity(env)) return noManagedIdentity;
+
+  /**
+   * One provider per scope: the two Azure wire dialects want different Entra
+   * audiences, and each managed-identity provider caches the token it holds
+   * (ADR 0022, ADR 0027).
+   */
+  const byScope = new Map<string, () => Promise<string>>();
+  return (scope: string) => {
+    let provider = byScope.get(scope);
+    if (provider === undefined) {
+      provider = createManagedIdentityTokenProvider({ env, scope });
+      byScope.set(scope, provider);
+    }
+    return provider();
+  };
 }
 
-function noManagedIdentity(): Promise<string> {
+function noManagedIdentity(scope: string): Promise<string> {
   return Promise.reject(
     new ImagineError(
       "auth_failed",
-      `providers.${AZURE_ID}.auth is "entra", but this process has no managed identity to obtain a token for ${AZURE_ENTRA_SCOPE} with: ${IDENTITY_ENDPOINT_ENV} and ${IDENTITY_HEADER_ENV} are not both set. Entra authentication works where the platform provides an identity, such as Azure Container Apps. On a developer machine set providers.${AZURE_ID}.auth to "api_key" and providers.${AZURE_ID}.api_key_env to the variable holding your key, or construct AzureProvider yourself with a getAccessToken option.`,
+      `providers.${AZURE_ID}.auth is "entra", but this process has no managed identity to obtain a token for ${scope} with: ${IDENTITY_ENDPOINT_ENV} and ${IDENTITY_HEADER_ENV} are not both set. Entra authentication works where the platform provides an identity, such as Azure Container Apps. On a developer machine set providers.${AZURE_ID}.auth to "api_key" and providers.${AZURE_ID}.api_key_env to the variable holding your key, or construct AzureProvider yourself with a getAccessToken option.`,
     ),
   );
 }

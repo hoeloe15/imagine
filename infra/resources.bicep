@@ -20,6 +20,12 @@ param authAudienceOverride string = ''
 @description('Comma-separated list of token subjects allowed to call this server, on top of token validation. Empty leaves the allowlist off.')
 param authAllowedSubjects string = ''
 
+@description('Serve the browser console at https://<fqdn>/portal. It only exists when authentication is also on; with auth off the server warns and its paths answer 404.')
+param portalEnabled bool = false
+
+@description('Public client id of the portal application at the issuer (WorkOS dashboard, Developer -> API Keys). Not a secret: it is the identifier a browser sends in the authorization URL.')
+param portalClientId string = ''
+
 @description('A config.json fragment carried in IMAGINE_CONFIG_JSON. Holds no secrets: api_key_env names variables, it never holds key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
 
@@ -333,6 +339,36 @@ var allowedSubjectsEnv = empty(authAllowedSubjects)
       }
     ]
 
+// The portal is plain strings only. Its client id is public, and the one
+// credential it might need — the token endpoint's client_secret, which at
+// WorkOS *is* the environment API key — deliberately never becomes an azd
+// variable: it is bootstrapped once with
+//   az keyvault secret set --vault-name <kv> --name workos-client-secret --value <sk_...>
+// and read at request time by the managed identity (ADR 0026), so an
+// administrative credential never sits in a deployment parameter or a revision.
+//
+// IMAGINE_PORTAL_SESSION_SECRET is optional and also left out on purpose. With
+// it unset the cookie signing key is random per process, which means a new
+// revision or a second replica asks for a fresh login — correct and safe. An
+// operator who wants sessions to survive a release can put a long random string
+// in the vault under portal-session-secret and map it in as a secretRef.
+var portalEnv = portalEnabled && authEnabled
+  ? [
+      {
+        name: 'IMAGINE_PORTAL_ENABLED'
+        value: 'true'
+      }
+      {
+        name: 'IMAGINE_PORTAL_WORKOS_CLIENT_ID'
+        value: portalClientId
+      }
+      {
+        name: 'IMAGINE_PUBLIC_URL'
+        value: mcpEndpointUrl
+      }
+    ]
+  : []
+
 var providerSecrets = concat(
   openRouterSecretInVault
     ? [
@@ -450,7 +486,8 @@ var containerEnv = concat(
       ],
   providerEnv,
   authEnv,
-  allowedSubjectsEnv
+  allowedSubjectsEnv,
+  portalEnv
 )
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
@@ -556,6 +593,14 @@ output AZURE_MANAGED_IDENTITY_CLIENT_ID string = identity.properties.clientId
 output AZURE_MANAGED_IDENTITY_PRINCIPAL_ID string = identity.properties.principalId
 output MCP_ENDPOINT_URL string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
 output MCP_RESOURCE_URI string = '${mcpEndpointUrl}/mcp'
+
+// Blank when the portal is off. When it is on, these two are exactly what has
+// to be registered at the issuer: the redirect URI matched character for
+// character, and the portal's own resource indicator.
+output PORTAL_URL string = portalEnabled && authEnabled ? '${mcpEndpointUrl}/portal' : ''
+output PORTAL_REDIRECT_URI string = portalEnabled && authEnabled
+  ? '${mcpEndpointUrl}/portal/auth/callback'
+  : ''
 
 output IMAGINE_OUTPUT_SINK string = outputSink
 output AZURE_STORAGE_ACCOUNT_NAME string = blobSinkEnabled ? storage.name : ''

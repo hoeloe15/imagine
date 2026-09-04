@@ -920,6 +920,119 @@ instead of pretending.
 
 ---
 
+## 6h. The portal: set provider keys from a browser
+
+This is the section that removes the terminal from section 6. Turn it on and
+`https://<fqdn>/portal` becomes a page you can open on a phone, sign in to with
+the same account your chat client uses, and paste an OpenRouter key into. The
+next `generate_image` from any client uses it, within a minute, with no `azd up`.
+
+**Do 6e and 6g first.** The portal only exists when authentication is on, and a
+page that writes secrets behind a login any Microsoft account can pass is not
+behind a login. If `IMAGINE_AUTH_ENABLED` is false the portal paths answer `404`
+and the startup banner says why, deliberately — there is no localhost-only
+convenience mode.
+
+### In the WorkOS dashboard
+
+Same environment as 6e. Three registrations, and the first two are matched
+character for character:
+
+1. **Redirects → Redirect URI:** `https://<fqdn>/portal/auth/callback`
+2. **Redirects → logout return URI:** `https://<fqdn>/portal`
+3. **Resource indicator:** `https://<fqdn>/portal`, alongside the `/mcp` one you
+   added in 6e. This gives the portal's token an audience that is not the MCP
+   endpoint's, so a portal token is not a tool token even for the moment the
+   portal holds it.
+
+The **client id** is on **Developer → API Keys** and looks like
+`client_01HB…`. It is public: it identifies the application in an authorization
+URL a browser follows, and it is safe in an azd variable and in the container's
+environment.
+
+**About the client secret, which you probably do not need.** WorkOS has no
+per-application client secret. The `client_secret` parameter of its token
+endpoint *is the environment's API key* (`sk_…`), the same credential that
+administers users and organisations — a much bigger thing to hold than an
+OpenRouter key. The portal therefore uses **PKCE and sends no secret at all**,
+which WorkOS documents as supported: `client_secret` is optional on
+`grant_type=authorization_code`, and `code_verifier` is required in its absence.
+
+If a login fails at the exchange with a message about client authentication, and
+only then:
+
+```powershell
+az keyvault secret set --vault-name <vault> --name workos-client-secret --value "<sk_...>"
+```
+
+The server reads it at request time through the managed identity. It never
+becomes an azd variable and never appears in a revision. That is the last
+two-pass secret in the system.
+
+### Turn it on
+
+```powershell
+azd env set IMAGINE_PORTAL_ENABLED true
+azd env set IMAGINE_PORTAL_WORKOS_CLIENT_ID "client_01HB..."
+azd up
+```
+
+`azd up` prints the two strings to register, so you can copy them rather than
+assembling them by hand:
+
+```powershell
+azd env get-value PORTAL_URL
+azd env get-value PORTAL_REDIRECT_URI
+```
+
+### What you get
+
+- **`GET /portal`** — the login page, or the provider console once you are in.
+- One password field per key-based provider, and a **Save**. The field is
+  write-only: no route on the portal returns a key in any shape, and the page
+  shows presence, source (`vault` / `env`) and the *name* of the vault secret,
+  never a last-four, a length or a preview.
+- A **Clear** action that deletes the vault secret and falls the provider back to
+  whatever the environment holds.
+- One audit line per write in the container's log stream — which is shipped to
+  Log Analytics and therefore survives the revision — naming the caller, the
+  action, the secret's name and the outcome. Never the value. That log stream is
+  a **stopgap** until the durable store lands; it is written down as one.
+
+### Verify it
+
+```powershell
+$fqdn = azd env get-value MCP_ENDPOINT_URL
+
+# The page exists and is cacheable nowhere:
+curl.exe -i "$fqdn/portal" | Select-String -Pattern 'HTTP/|cache-control|content-security-policy'
+
+# The login leg is a redirect carrying PKCE, not a password form:
+curl.exe -i "$fqdn/portal/auth/login" | Select-String -Pattern 'location:'
+
+# /mcp is untouched by any of it - still a 401 with no token:
+curl.exe -i -X POST "$fqdn/mcp" -H "content-type: application/json" -d '{}'
+```
+
+Then, in a browser: open `https://<fqdn>/portal`, sign in, paste the key, and
+ask a chat client for `list_capabilities`. It should read `"status": "ready"`
+with `"key_source": "vault"` — with no deployment in between. That round trip is
+the whole point of the section.
+
+### Sessions, and the one thing to know about them
+
+The session cookie is `HttpOnly; Secure; SameSite=Lax; Path=/portal`, signed
+(not encrypted — nothing inside it is secret) and valid for eight hours. There is
+no refresh: it expires and you sign in again.
+
+The signing key is **random per process** unless you set one, so a new revision,
+or landing on a different replica, asks for a fresh login. That is safe and
+usually invisible. If it annoys you, put a long random string in the vault and
+map it in as `IMAGINE_PORTAL_SESSION_SECRET`; it is deliberately not an azd
+variable, because it is a signing key.
+
+---
+
 ## 7. Verify the deployed endpoint
 
 Three checks, in order. Do not skip to the client until all three pass — the

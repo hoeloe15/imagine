@@ -54,6 +54,12 @@ param authAudienceOverride string = ''
 @description('Comma-separated token subjects allowed to call this server, checked on top of token validation. Empty leaves the allowlist off, and every validated token is accepted.')
 param authAllowedSubjects string = ''
 
+@description('Serve the browser console at https://<fqdn>/portal, where a provider key can be pasted in without a terminal or a redeploy. Requires authentication to be on: with it off the portal paths answer 404 and the startup banner says why.')
+param portalEnabled bool = false
+
+@description('Public client id of the portal application at the issuer — the WorkOS dashboard, under Developer -> API Keys. Public by design: it identifies the application in an authorization URL a browser follows. Required when portalEnabled is true. The token exchange uses PKCE and no secret; if a client secret proves necessary it goes into Key Vault as workos-client-secret and never becomes a parameter.')
+param portalClientId string = ''
+
 @description('A config.json fragment for the container, as one JSON string. This is how the hosted server learns providers.azure.endpoint, deployments and auth, since the image has no config file. It holds no secrets: api_key_env names environment variables and never key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
 
@@ -102,6 +108,8 @@ module resources 'resources.bicep' = {
     authMetadataUrl: authMetadataUrl
     authAudienceOverride: authAudienceOverride
     authAllowedSubjects: authAllowedSubjects
+    portalEnabled: portalEnabled
+    portalClientId: portalClientId
     imagineConfigJson: imagineConfigJson
     foundryResourceId: foundryResourceId
     outputSink: outputSink
@@ -137,3 +145,9 @@ output MCP_ENDPOINT_URL string = resources.outputs.MCP_ENDPOINT_URL
 // The exact string that must appear in the app registration's Application ID
 // URI list, or the token request fails with AADSTS9010010 (research §3.3).
 output MCP_RESOURCE_URI string = resources.outputs.MCP_RESOURCE_URI
+
+// The exact strings to register at the issuer when the portal is on: the
+// redirect URI is matched character for character, and the portal URL is both
+// the logout return URI and the portal's own resource indicator.
+output PORTAL_URL string = resources.outputs.PORTAL_URL
+output PORTAL_REDIRECT_URI string = resources.outputs.PORTAL_REDIRECT_URI

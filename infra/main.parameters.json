@@ -50,6 +50,12 @@
     "authAllowedSubjects": {
       "value": "${IMAGINE_ALLOWED_SUBJECTS=}"
     },
+    "portalEnabled": {
+      "value": "${IMAGINE_PORTAL_ENABLED=false}"
+    },
+    "portalClientId": {
+      "value": "${IMAGINE_PORTAL_WORKOS_CLIENT_ID=}"
+    },
     "imagineConfigJson": {
       "value": "${IMAGINE_CONFIG_JSON=}"
     },

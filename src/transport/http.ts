@@ -46,6 +46,18 @@ export interface RequestContext {
   caller: CallerIdentity | null;
 }
 
+/**
+ * A family of paths served by something that is not the MCP endpoint. All the
+ * route table knows about the portal is this: which paths it owns, and how to
+ * hand it a request. The portal is constructed elsewhere, from the same core
+ * dependencies the MCP server gets, so moving it into a container app of its
+ * own stays infrastructure work (issue #47).
+ */
+export interface PathHandler {
+  handles(path: string): boolean;
+  handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
+}
+
 export interface HttpTransportOptions extends Partial<HttpSettings> {
   /**
    * Called once per POST. Request handling is stateless, so every request gets
@@ -77,6 +89,16 @@ export interface HttpTransportOptions extends Partial<HttpSettings> {
    * passing it explicitly replaces that.
    */
   challengeParams?: Readonly<Record<string, string>>;
+  /**
+   * The browser console, when it is switched on and there is a login to put in
+   * front of it. Absent means its paths are not routes at all and answer 404,
+   * the way ADR 0021 makes the metadata document not exist when auth is off.
+   *
+   * It is reached before authentication and before the origin check, and it
+   * never sees a `/mcp` request: the two are separated at the route table so
+   * that `/mcp` can ignore cookies and the portal can ignore `Authorization`.
+   */
+  portal?: PathHandler;
 }
 
 export interface RunningHttpServer {
@@ -223,6 +245,13 @@ async function route(
       return;
     }
 
+    // Its own family, with its own session, CSRF and origin rules. Everything
+    // below this line is the MCP endpoint and is unchanged by it.
+    if (options.portal?.handles(path)) {
+      await options.portal.handle(req, res);
+      return;
+    }
+
     if (path !== MCP_PATH) {
       sendJson(res, 404, { error: notFoundMessage(options) });
       return;
@@ -264,7 +293,12 @@ async function route(
 }
 
 function notFoundMessage(options: HttpTransportOptions): string {
-  const paths = [MCP_PATH, HEALTH_PATH, ...(options.protectedResource?.paths ?? [])];
+  const paths = [
+    MCP_PATH,
+    HEALTH_PATH,
+    ...(options.protectedResource?.paths ?? []),
+    ...(options.portal ? ["/portal"] : []),
+  ];
   return `Not found. This server serves ${paths.join(", ")}.`;
 }
 

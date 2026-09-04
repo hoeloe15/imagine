@@ -76,6 +76,28 @@ const blobSchema = z.strictObject({
   url_ttl_hours: urlTtlHours.default(1),
 });
 
+/**
+ * How a deployment may be written. The bare string is the original form and
+ * means the Azure OpenAI dialect, so every config written before ADR 0027 keeps
+ * working; the object form is what a MAI-Image deployment needs, because that
+ * API lives on a different host and puts the deployment name in the body rather
+ * than in the URL. See ADR 0014 (amended) and ADR 0027.
+ */
+const wireDialect = z.enum(["openai", "mai"]);
+
+const deploymentValue = z.union([
+  z.string().min(1),
+  z.strictObject({
+    deployment: z.string().min(1),
+    dialect: wireDialect.optional(),
+    endpoint: z
+      .url("expected an absolute URL, e.g. https://example.services.ai.azure.com")
+      .optional(),
+  }),
+]);
+
+const deployments = z.record(z.string().min(1), deploymentValue);
+
 const providerFileSchema = z
   .strictObject({
     enabled: z.boolean(),
@@ -84,7 +106,7 @@ const providerFileSchema = z
     endpoint: z.url("expected an absolute URL, e.g. https://example.openai.azure.com"),
     api_version: z.string().min(1),
     auth,
-    deployments: z.record(z.string().min(1), z.string().min(1)),
+    deployments,
   })
   .partial();
 
@@ -95,7 +117,7 @@ const providerSchema = z.strictObject({
   endpoint: z.url().optional(),
   api_version: z.string().min(1).optional(),
   auth: auth.optional(),
-  deployments: z.record(z.string().min(1), z.string().min(1)).optional(),
+  deployments: deployments.optional(),
 });
 
 /** What a `config.json` on disk may contain. Everything is optional. */
@@ -212,6 +234,8 @@ export type ProviderConfig = Config["providers"][string];
 export type LogLevel = z.infer<typeof logLevel>;
 export type OnBudgetExceeded = z.infer<typeof onExceed>;
 export type ProviderAuth = z.infer<typeof auth>;
+export type WireDialect = z.infer<typeof wireDialect>;
+export type DeploymentConfig = z.infer<typeof deploymentValue>;
 export type OutputSink = z.infer<typeof sink>;
 export type BlobOutputConfig = z.infer<typeof blobSchema>;
 
