@@ -168,6 +168,10 @@ export function loadConfig(options: LoadConfigOptions = {}): LoadedConfig {
  * The key for a provider, read from the environment variable the config names.
  * Returns `null` when the provider authenticates without a key (Entra).
  *
+ * This is the environment half, and the whole story on a developer machine. The
+ * server itself resolves keys through `core/secrets.ts`, which consults a Key
+ * Vault first where one is configured and falls back to exactly this (ADR 0026).
+ *
  * Throws an {@link ImagineError} rather than returning an empty string, so a
  * missing key surfaces as one actionable message instead of a provider 401.
  */

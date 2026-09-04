@@ -12,6 +12,11 @@
  */
 
 import { ImagineError, type FailureReason } from "../core/errors.js";
+import {
+  toApiKeySource,
+  type ApiKeyOption,
+  type ApiKeySource,
+} from "../core/secrets.js";
 import type {
   ImageSize,
   NormalisedRequest,
@@ -45,8 +50,11 @@ export interface AzureProviderOptions {
   endpoint?: string | null;
   apiVersion?: string;
   auth?: AzureAuthMode;
-  /** Only read in `api_key` mode. */
-  apiKey?: string | null;
+  /**
+   * Only read in `api_key` mode. A plain string still works; a source is read
+   * at request time, so a rotated key is picked up without a restart (ADR 0026).
+   */
+  apiKey?: ApiKeyOption;
   /** Curated model id → deployment name, from `providers.azure.deployments`. */
   deployments?: Readonly<Record<string, string>>;
   /** Only read in `entra` mode. */
@@ -70,7 +78,7 @@ export class AzureProvider implements ImageProvider {
   readonly #endpoint: string | null;
   readonly #apiVersion: string;
   readonly #auth: AzureAuthMode;
-  readonly #apiKey: string | null;
+  readonly #apiKey: ApiKeySource;
   readonly #deployments: Readonly<Record<string, string>>;
   readonly #getAccessToken: AccessTokenProvider | undefined;
   readonly #fetch: FetchLike;
@@ -85,7 +93,7 @@ export class AzureProvider implements ImageProvider {
         : stripTrailingSlash(options.endpoint);
     this.#apiVersion = options.apiVersion ?? AZURE_DEFAULT_API_VERSION;
     this.#auth = options.auth ?? "entra";
-    this.#apiKey = options.apiKey ?? null;
+    this.#apiKey = toApiKeySource(options.apiKey);
     this.#deployments = { ...(options.deployments ?? {}) };
     this.#getAccessToken = options.getAccessToken;
     this.#fetch = options.fetch ?? globalThis.fetch;
@@ -149,9 +157,10 @@ export class AzureProvider implements ImageProvider {
     };
   }
 
+  /** A source, not a value: see the note on `isConfigured` in ADR 0026. */
   #hasCredential(): boolean {
     return this.#auth === "api_key"
-      ? typeof this.#apiKey === "string" && this.#apiKey.length > 0
+      ? this.#apiKey.has()
       : this.#getAccessToken !== undefined;
   }
 
@@ -240,7 +249,7 @@ export class AzureProvider implements ImageProvider {
 
   async #authHeader(): Promise<Record<string, string>> {
     if (this.#auth === "api_key") {
-      const apiKey = this.#apiKey;
+      const apiKey = await this.#apiKey.get();
       if (apiKey === null || apiKey.length === 0) {
         throw new ImagineError(
           "auth_failed",

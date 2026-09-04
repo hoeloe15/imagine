@@ -95,6 +95,7 @@ in any editor with JSON Schema support:
 | `default.use_case`           | One of `text_in_image`, `photoreal`, `illustration`, `diagram`, `fast_bulk`, or `null`.        |
 | `providers.<id>.enabled`     | Whether the router may route to it at all.                                                     |
 | `providers.<id>.api_key_env` | The **name** of the environment variable holding the key. Never the key itself.                |
+| `providers.<id>.api_key_secret` | The **name** of the Key Vault secret holding the key. Only used where a vault is configured; derived from `api_key_env` when absent. |
 | `providers.<id>.endpoint`    | Resource URL, for providers that need one. Required when `auth` is `entra`.                     |
 | `providers.<id>.api_version` | API version string. Azure defaults to `2025-04-01-preview`.                                    |
 | `providers.<id>.auth`        | `api_key` or `entra`. `entra` needs no key variable, and needs a managed identity to run under. |
@@ -112,6 +113,68 @@ in any editor with JSON Schema support:
 the whole config object is therefore safe to log, and `list_capabilities` can
 report a missing credential by naming the variable without ever reading it. See
 [ADR 0004](adr/0004-config-loading-and-key-resolution.md).
+
+## Keys from Azure Key Vault, on a running deployment
+
+Where the server runs in Azure with a Key Vault — which is what the azd template
+gives you — a key does not have to arrive as an environment variable at all. The
+server reads the vault itself, **at the moment a call needs a key**, so putting a
+key in is one command and no deployment:
+
+```powershell
+$vault = azd env get-value AZURE_KEY_VAULT_NAME
+az keyvault secret set --vault-name $vault --name openrouter-api-key --value "<key>"
+```
+
+The next `generate_image` uses it. Values are cached for a minute, so the honest
+promise is **"ready within a minute"**, not "instantly" — and with more than one
+replica running, the replica that answers may not be the one that noticed first.
+
+This switches itself on: the template sets `IMAGINE_KEY_VAULT_URL` on the
+container, and the container's managed identity is what reads the vault. Neither
+present means the server reads the environment and nothing else, which is exactly
+what a laptop does.
+
+**Which secret is read.** By convention, the name of `api_key_env` lower-cased
+with underscores turned into hyphens — `OPENROUTER_API_KEY` becomes
+`openrouter-api-key`, `AZURE_OPENAI_API_KEY` becomes `azure-openai-api-key`.
+Those are the names the template already uses, so nothing needs configuring. If
+your vault names things differently, say so:
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "api_key_secret": "prod-openrouter"
+    }
+  }
+}
+```
+
+Like `api_key_env`, this is a **name and never a value** — it only accepts what
+Key Vault accepts as a secret name (letters, digits and hyphens, up to 127 of
+them), so most accidental pastes of a key become a validation error.
+
+**The vault wins over the environment**, because the vault is what a person can
+change without a deployment. If the vault has no such secret, or cannot be
+reached for a moment, the environment variable is used instead.
+
+`list_capabilities` reports which of the two a provider's key came from as
+`key_source: "vault" | "env" | null`, and a provider that is still waiting lists
+both places it could be put:
+
+```json
+{
+  "id": "openrouter",
+  "status": "not_configured",
+  "key_source": null,
+  "missing": ["OPENROUTER_API_KEY", "vault secret openrouter-api-key"]
+}
+```
+
+It never reports the value, a fragment of it, or its length. See
+[ADR 0026](adr/0026-runtime-provider-secrets-from-key-vault.md).
 
 ## Azure OpenAI
 

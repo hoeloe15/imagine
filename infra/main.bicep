@@ -21,10 +21,10 @@ param principalId string = ''
 @description('Image the container app runs until `azd deploy` replaces it with a locally built one. See ADR 0019.')
 param containerImage string = 'ghcr.io/hoeloe15/imagine:edge'
 
-@description('Set to true only after `az keyvault secret set --name openrouter-api-key` has run. A Key Vault reference to a secret that does not exist fails the revision. See ADR 0019.')
+@description('Optional. Maps the vault secret onto OPENROUTER_API_KEY as a Key Vault reference. Not needed for the server to use the key — it reads the vault itself at request time (ADR 0026). Set to true only after `az keyvault secret set --name openrouter-api-key` has run: a reference to a secret that does not exist fails the revision.')
 param openRouterSecretInVault bool = false
 
-@description('Set to true only after `az keyvault secret set --name azure-openai-api-key` has run.')
+@description('Optional, and the same story as openRouterSecretInVault. Set to true only after `az keyvault secret set --name azure-openai-api-key` has run.')
 param azureOpenAiSecretInVault bool = false
 
 @description('Turn on IMAGINE_AUTH_* on the container app. Leave false until there is an authority to validate against; the server refuses to start half-configured (ADR 0017).')
@@ -50,6 +50,9 @@ param authMetadataUrl string = ''
 
 @description('Replaces the computed audience list outright. Empty keeps the computed one, which already starts with the deployed https://<fqdn>/mcp URL — the value WorkOS puts in aud when that URL is a registered resource indicator.')
 param authAudienceOverride string = ''
+
+@description('Comma-separated token subjects allowed to call this server, checked on top of token validation. Empty leaves the allowlist off, and every validated token is accepted.')
+param authAllowedSubjects string = ''
 
 @description('A config.json fragment for the container, as one JSON string. This is how the hosted server learns providers.azure.endpoint, deployments and auth, since the image has no config file. It holds no secrets: api_key_env names environment variables and never key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
@@ -98,6 +101,7 @@ module resources 'resources.bicep' = {
     authIssuer: authIssuer
     authMetadataUrl: authMetadataUrl
     authAudienceOverride: authAudienceOverride
+    authAllowedSubjects: authAllowedSubjects
     imagineConfigJson: imagineConfigJson
     foundryResourceId: foundryResourceId
     outputSink: outputSink

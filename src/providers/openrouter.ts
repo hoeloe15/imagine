@@ -8,6 +8,11 @@
  */
 
 import { ImagineError, type FailureReason } from "../core/errors.js";
+import {
+  toApiKeySource,
+  type ApiKeyOption,
+  type ApiKeySource,
+} from "../core/secrets.js";
 import type {
   ImageSize,
   NormalisedRequest,
@@ -34,8 +39,12 @@ const DEFAULT_LIST_MODELS_TIMEOUT_MS = 15_000;
 export type FetchLike = typeof globalThis.fetch;
 
 export interface OpenRouterProviderOptions {
-  /** `null` or absent means "not configured"; nothing is sent without it. */
-  apiKey?: string | null;
+  /**
+   * The key, or a source to read it from at request time. `null` or absent
+   * means "not configured"; nothing is sent without a key. A plain string is
+   * still accepted and behaves exactly as it always has (ADR 0026).
+   */
+  apiKey?: ApiKeyOption;
   /** Used when the adapter is called without a router-resolved model. */
   model?: string;
   baseUrl?: string;
@@ -48,7 +57,7 @@ export interface OpenRouterProviderOptions {
 export class OpenRouterProvider implements ImageProvider {
   readonly id = OPENROUTER_ID;
 
-  readonly #apiKey: string | null;
+  readonly #apiKey: ApiKeySource;
   readonly #defaultModel: string;
   readonly #baseUrl: string;
   readonly #fetch: FetchLike;
@@ -57,7 +66,7 @@ export class OpenRouterProvider implements ImageProvider {
   readonly #now: () => number;
 
   constructor(options: OpenRouterProviderOptions = {}) {
-    this.#apiKey = options.apiKey ?? null;
+    this.#apiKey = toApiKeySource(options.apiKey);
     this.#defaultModel = options.model ?? OPENROUTER_DEFAULT_MODEL;
     this.#baseUrl = stripTrailingSlash(options.baseUrl ?? OPENROUTER_BASE_URL);
     this.#fetch = options.fetch ?? globalThis.fetch;
@@ -67,8 +76,9 @@ export class OpenRouterProvider implements ImageProvider {
     this.#now = options.now ?? Date.now;
   }
 
+  /** "A source is configured", not "a value was read at startup" (ADR 0026). */
   isConfigured(): boolean {
-    return typeof this.#apiKey === "string" && this.#apiKey.length > 0;
+    return this.#apiKey.has();
   }
 
   async listModels(): Promise<ProviderModel[]> {
@@ -125,11 +135,11 @@ export class OpenRouterProvider implements ImageProvider {
     path: string,
     options: { method: "GET" | "POST"; body?: string; timeoutMs: number },
   ): Promise<Record<string, unknown>> {
-    const apiKey = this.#apiKey;
+    const apiKey = await this.#apiKey.get();
     if (apiKey === null || apiKey.length === 0) {
       throw new ImagineError(
         "auth_failed",
-        `No OpenRouter API key. Set OPENROUTER_API_KEY (or whatever providers.${OPENROUTER_ID}.api_key_env names) before calling ${OPENROUTER_ID}.`,
+        `No OpenRouter API key. Set OPENROUTER_API_KEY (or whatever providers.${OPENROUTER_ID}.api_key_env names) before calling ${OPENROUTER_ID}. Where a Key Vault is configured, setting the openrouter-api-key secret is enough — no redeploy.`,
       );
     }
 

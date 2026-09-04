@@ -30,6 +30,22 @@ const envVarName = z
     "expected the NAME of an environment variable (letters, digits and underscores), not a key value",
   );
 
+/**
+ * A Key Vault secret name, which is what Azure itself accepts: letters, digits
+ * and hyphens, up to 127 characters. The regex is here for the same reason
+ * `envVarName`'s is — most things a person could paste into this field by
+ * accident become a validation error naming the field rather than a secret
+ * sitting in a config file. It is not a perfect sieve, and does not claim to
+ * be: a key made only of letters, digits and hyphens is a legal secret name.
+ * See ADR 0004 and ADR 0026.
+ */
+const secretName = z
+  .string()
+  .regex(
+    /^[A-Za-z0-9-]{1,127}$/,
+    "expected the NAME of a Key Vault secret (letters, digits and hyphens), not a key value",
+  );
+
 const path = z.string().min(1, "expected a non-empty path");
 const usd = z.number().positive("expected a positive amount in US dollars");
 const sink = z.enum(["local", "blob"]);
@@ -64,6 +80,7 @@ const providerFileSchema = z
   .strictObject({
     enabled: z.boolean(),
     api_key_env: envVarName.nullable(),
+    api_key_secret: secretName.nullable(),
     endpoint: z.url("expected an absolute URL, e.g. https://example.openai.azure.com"),
     api_version: z.string().min(1),
     auth,
@@ -74,6 +91,7 @@ const providerFileSchema = z
 const providerSchema = z.strictObject({
   enabled: z.boolean().default(true),
   api_key_env: envVarName.nullable().default(null),
+  api_key_secret: secretName.nullable().default(null),
   endpoint: z.url().optional(),
   api_version: z.string().min(1).optional(),
   auth: auth.optional(),
@@ -159,11 +177,11 @@ export const configSchema = z
         continue;
       }
 
-      if (!provider.api_key_env) {
+      if (!provider.api_key_env && !provider.api_key_secret) {
         ctx.addIssue({
           code: "custom",
           path: ["providers", id, "api_key_env"],
-          message: `required: provider "${id}" is enabled, so it needs the name of the environment variable holding its key (or "auth": "entra")`,
+          message: `required: provider "${id}" is enabled, so it needs the name of the environment variable holding its key (or a Key Vault secret in api_key_secret, or "auth": "entra")`,
         });
       }
     }
@@ -183,7 +201,7 @@ export function configJsonSchema(): Record<string, unknown> {
     $id: "https://raw.githubusercontent.com/hoeloe15/imagine/main/schema/config.schema.json",
     title: "imagine configuration",
     description:
-      "Configuration for the imagine MCP server. API keys are never stored here: api_key_env names the environment variable holding the key.",
+      "Configuration for the imagine MCP server. API keys are never stored here: api_key_env names the environment variable holding the key, and api_key_secret names a Key Vault secret.",
     ...rest,
   };
 }

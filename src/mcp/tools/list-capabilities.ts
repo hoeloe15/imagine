@@ -7,9 +7,10 @@
  * provider for live model discovery. Nothing is generated and nothing is
  * written, so the tool is `readOnlyHint`.
  *
- * A key value never appears in the result. The only credential-shaped thing
- * that crosses the wire is the *name* of an environment variable that is not
- * set, which is what makes the answer actionable. See ADR 0011.
+ * A key value never appears in the result. The only credential-shaped things
+ * that cross the wire are the *name* of an environment variable or Key Vault
+ * secret that is not set, and which of the two a present key came from — which
+ * is what makes the answer actionable. See ADR 0011 and ADR 0026.
  */
 
 import { z } from "zod";
@@ -21,6 +22,11 @@ import type { Env } from "../../core/config.js";
 import { isImagineError, type FailureReason } from "../../core/errors.js";
 import { availabilityFor, type ModelKnowledge } from "../../core/knowledge.js";
 import { planCandidates } from "../../core/router.js";
+import {
+  createSecretResolver,
+  type SecretResolver,
+  type SecretSourceKind,
+} from "../../core/secrets.js";
 import { USE_CASES } from "../../core/types.js";
 import type { ImageProvider } from "../../providers/types.js";
 
@@ -39,6 +45,13 @@ export interface ListCapabilitiesDependencies {
    * would see anyway.
    */
   env?: Env;
+  /**
+   * Where a provider key would actually come from. The tool asks this rather
+   * than reading `env[variable]` itself, so what it reports is the same truth
+   * the router acts on — including a key that lives only in Key Vault. Defaults
+   * to an environment-only resolver, which is what it always did (ADR 0026).
+   */
+  secrets?: SecretResolver;
 }
 
 /** `ready` means a request would reach this provider, not that it will succeed. */
@@ -51,7 +64,17 @@ export interface ProviderCapability {
   models: string[];
   /** Whether `models` came from the provider itself or from `data/models.json`. */
   models_source: "live" | "curated";
-  /** Names of environment variables that are not set. Never values. */
+  /**
+   * Where this provider's key came from: the vault, the environment, or `null`
+   * when there is none to speak of. Never the value, never a fragment of it,
+   * not even a length.
+   */
+  key_source?: SecretSourceKind | null;
+  /**
+   * Names of the places a key could be put and is not — an environment
+   * variable, and `vault secret <name>` where a vault is configured. Never
+   * values.
+   */
   missing?: string[];
   /** Why the provider is not usable, when the status alone does not say it. */
   note?: string;
@@ -94,6 +117,7 @@ const providerCapabilitySchema = z.object({
   status: z.enum(["ready", "not_configured", "error"]),
   models: z.array(z.string()),
   models_source: z.enum(["live", "curated"]),
+  key_source: z.enum(["vault", "env"]).nullable().optional(),
   missing: z.array(z.string()).optional(),
   note: z.string().optional(),
   error: z.string().optional(),
@@ -113,7 +137,7 @@ export const listCapabilitiesOutputSchema = {
   configured_providers: z
     .array(providerCapabilitySchema)
     .describe(
-      "Every provider this installation knows about, ready or not, with the environment variables a not_configured one is waiting for.",
+      "Every provider this installation knows about, ready or not, with where a ready one's key came from and the environment variables or vault secrets a not_configured one is waiting for.",
     ),
   default_model: z
     .string()
@@ -184,38 +208,57 @@ function curatedRefsFor(knowledge: ModelKnowledge, providerId: string): string[]
 interface Credentials {
   ready: boolean;
   missing: string[];
+  keySource: SecretSourceKind | null;
   note?: string;
 }
 
 /**
- * Whether a provider's credentials are present, without ever reading a value.
+ * Whether a provider's credentials are present, without ever reading a value
+ * out into the answer. The resolver is asked rather than the environment read
+ * directly, so a key that lives only in Key Vault is reported as present and
+ * `key_source` says which of the two it came from.
+ *
  * Entra authenticates from the ambient identity, so there is no variable to
  * check and nothing to report missing.
  */
-function credentials(provider: ProviderConfig | undefined, env: Env): Credentials {
-  if (provider === undefined) return { ready: true, missing: [] };
+async function credentials(
+  providerId: string,
+  provider: ProviderConfig | undefined,
+  secrets: SecretResolver,
+): Promise<Credentials> {
+  if (provider === undefined) return { ready: true, missing: [], keySource: null };
 
   if (!provider.enabled) {
     return {
       ready: false,
       missing: [],
+      keySource: null,
       note: "Disabled in configuration.",
     };
   }
 
-  if (provider.auth === "entra") return { ready: true, missing: [] };
+  if (provider.auth === "entra") return { ready: true, missing: [], keySource: null };
 
-  const variable = provider.api_key_env;
-  if (variable === null) {
+  if (provider.api_key_env === null && provider.api_key_secret === null) {
     return {
       ready: false,
       missing: [],
-      note: "No api_key_env is configured, so there is no environment variable to read a key from.",
+      keySource: null,
+      note: "Neither api_key_env nor api_key_secret is configured, so there is nowhere to read a key from.",
     };
   }
 
-  if (!env[variable]) return { ready: false, missing: [variable] };
-  return { ready: true, missing: [] };
+  const lookup = await secrets.lookup(providerId);
+  if (lookup.resolution !== null) {
+    return { ready: true, missing: [], keySource: lookup.resolution.source };
+  }
+
+  return {
+    ready: false,
+    missing: lookup.missing,
+    keySource: null,
+    ...(lookup.note === undefined ? {} : { note: lookup.note }),
+  };
 }
 
 function providerIds(deps: ListCapabilitiesDependencies): string[] {
@@ -229,11 +272,12 @@ function providerIds(deps: ListCapabilitiesDependencies): string[] {
 async function describeProvider(
   id: string,
   deps: ListCapabilitiesDependencies,
-  env: Env,
+  secrets: SecretResolver,
 ): Promise<ProviderCapability> {
   const curated = curatedRefsFor(deps.knowledge, id);
   const adapter = deps.providers.find((provider) => provider.id === id);
-  const credential = credentials(deps.config.providers[id], env);
+  const credential = await credentials(id, deps.config.providers[id], secrets);
+  const keySource = { key_source: credential.keySource };
 
   if (!credential.ready) {
     return {
@@ -241,6 +285,7 @@ async function describeProvider(
       status: "not_configured",
       models: curated,
       models_source: "curated",
+      ...keySource,
       ...(credential.missing.length === 0 ? {} : { missing: credential.missing }),
       ...(credential.note === undefined ? {} : { note: credential.note }),
     };
@@ -252,6 +297,7 @@ async function describeProvider(
       status: "not_configured",
       models: curated,
       models_source: "curated",
+      ...keySource,
       note: "No adapter for this provider is registered in this build, so nothing can be routed to it yet.",
     };
   }
@@ -262,6 +308,7 @@ async function describeProvider(
       status: "not_configured",
       models: curated,
       models_source: "curated",
+      ...keySource,
       note: "The adapter reports itself unconfigured.",
     };
   }
@@ -273,6 +320,7 @@ async function describeProvider(
       status: "error",
       models: curated,
       models_source: "curated",
+      ...keySource,
       error: live.error,
     };
   }
@@ -282,6 +330,7 @@ async function describeProvider(
     status: "ready",
     models: merge(curated, live.models),
     models_source: "live",
+    ...keySource,
   };
 }
 
@@ -336,9 +385,11 @@ export async function listCapabilities(
   deps: ListCapabilitiesDependencies,
 ): Promise<CallToolResult> {
   try {
-    const env = deps.env ?? process.env;
+    const secrets =
+      deps.secrets ??
+      createSecretResolver({ config: deps.config, env: deps.env ?? process.env });
     const providers = await Promise.all(
-      providerIds(deps).map((id) => describeProvider(id, deps, env)),
+      providerIds(deps).map((id) => describeProvider(id, deps, secrets)),
     );
     const ready = providers
       .filter((provider) => provider.status === "ready")

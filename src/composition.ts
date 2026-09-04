@@ -8,14 +8,27 @@
  * reports itself unconfigured, the server starts, and `generate_image` answers
  * with a failure envelope saying what is missing — a client that cannot start
  * the server cannot show the user why.
+ *
+ * Nor does startup *read* a key. Each adapter is handed a source it asks at
+ * request time, so a key that appears in Key Vault after the container started
+ * is used by the next call rather than by the next deployment (ADR 0026).
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AZURE_STORAGE_SCOPE, createBlobSink } from "./core/blob-sink.js";
 import { openCostLedger, type CostLedger } from "./core/budget.js";
 import type { ObjectSink } from "./core/output.js";
-import { loadConfig, resolveApiKey, type LoadConfigOptions } from "./core/config.js";
+import { loadConfig, type LoadConfigOptions } from "./core/config.js";
 import { loadBundledModelKnowledge } from "./core/knowledge.js";
+import {
+  AZURE_KEY_VAULT_SCOPE,
+  KEY_VAULT_URL_ENV,
+  apiKeySourceFor,
+  createKeyVaultSecretStore,
+  createSecretResolver,
+  type SecretResolver,
+  type SecretStore,
+} from "./core/secrets.js";
 import {
   AZURE_ID,
   AzureProvider,
@@ -41,19 +54,23 @@ export interface BuildOptions extends LoadConfigOptions {
   ledger?: CostLedger;
   /** Replaces the output sink the `output` config would otherwise select. */
   sink?: ObjectSink;
+  /** Replaces the secret resolver the environment would otherwise select. */
+  secrets?: SecretResolver;
 }
 
 export async function buildDependencies(
   options: BuildOptions = {},
 ): Promise<ServerDependencies> {
-  const { providers, ledger, sink, ...configOptions } = options;
+  const { providers, ledger, sink, secrets, ...configOptions } = options;
   const loaded = loadConfig(configOptions);
   const { config } = loaded;
   const outputSink = sink ?? blobSink(loaded);
+  const resolver = secrets ?? secretResolver(loaded);
 
   return {
     config,
     env: loaded.env,
+    secrets: resolver,
     ...(outputSink === undefined ? {} : { sink: outputSink }),
     knowledge: loadBundledModelKnowledge(),
     ledger:
@@ -63,10 +80,40 @@ export async function buildDependencies(
         costLog: config.logging.cost_log,
       })),
     providers: providers ?? [
-      new OpenRouterProvider({ apiKey: keyOrNull(loaded, OPENROUTER_ID) }),
-      azureProvider(loaded),
+      new OpenRouterProvider({ apiKey: apiKeySourceFor(resolver, OPENROUTER_ID) }),
+      azureProvider(loaded, resolver),
     ],
   };
+}
+
+/**
+ * Keys are read when a request needs one, not once at startup — so a key put
+ * into Key Vault becomes usable without a redeploy (ADR 0026).
+ *
+ * Without `IMAGINE_KEY_VAULT_URL`, or without an identity to read that vault
+ * with, this is an environment-only resolver: exactly the behaviour every
+ * local installation has always had.
+ */
+function secretResolver(loaded: ReturnType<typeof loadConfig>): SecretResolver {
+  const vault = keyVaultStore(loaded.env);
+  return createSecretResolver({
+    config: loaded.config,
+    env: loaded.env,
+    ...(vault === undefined ? {} : { vault }),
+  });
+}
+
+function keyVaultStore(env: Env): SecretStore | undefined {
+  const vaultUrl = env[KEY_VAULT_URL_ENV]?.trim();
+  if (!vaultUrl || !hasManagedIdentity(env)) return undefined;
+
+  return createKeyVaultSecretStore({
+    vaultUrl,
+    getAccessToken: createManagedIdentityTokenProvider({
+      env,
+      scope: AZURE_KEY_VAULT_SCOPE,
+    }),
+  });
 }
 
 /**
@@ -99,7 +146,10 @@ function noManagedIdentityForStorage(): Promise<string> {
   );
 }
 
-function azureProvider(loaded: ReturnType<typeof loadConfig>): AzureProvider {
+function azureProvider(
+  loaded: ReturnType<typeof loadConfig>,
+  secrets: SecretResolver,
+): AzureProvider {
   const provider = loaded.config.providers[AZURE_ID];
   const auth = provider?.auth ?? "entra";
 
@@ -110,7 +160,7 @@ function azureProvider(loaded: ReturnType<typeof loadConfig>): AzureProvider {
       ? {}
       : { apiVersion: provider.api_version }),
     auth,
-    apiKey: keyOrNull(loaded, AZURE_ID),
+    apiKey: apiKeySourceFor(secrets, AZURE_ID),
     ...(provider?.deployments === undefined
       ? {}
       : { deployments: provider.deployments }),
@@ -143,15 +193,4 @@ export async function createImagineServer(
   options: BuildOptions = {},
 ): Promise<McpServer> {
   return createServer(await buildDependencies(options));
-}
-
-function keyOrNull(
-  loaded: ReturnType<typeof loadConfig>,
-  providerId: string,
-): string | null {
-  try {
-    return resolveApiKey(loaded, providerId);
-  } catch {
-    return null;
-  }
 }

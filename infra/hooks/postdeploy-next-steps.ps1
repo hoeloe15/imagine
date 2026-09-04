@@ -108,15 +108,25 @@ if ($authEnabled -and $issuerMode) {
 
 Write-Host ''
 
+Write-Host '  OpenRouter: the server reads the key from Key Vault itself, at the'
+Write-Host '  moment a call needs it. One command, no redeploy, live within a minute:'
+Write-Host ''
+Write-Host "      az keyvault secret set --vault-name $vault --name openrouter-api-key --value `"<key>`""
+Write-Host ''
+if (-not $authEnabled) {
+    Write-Host '  Turn authentication on BEFORE you run it. An open endpoint with no'
+    Write-Host '  credentials costs a stranger nothing; an open endpoint with your key'
+    Write-Host '  spends your money.'
+    Write-Host ''
+}
+Write-Host '  Check it landed by calling list_capabilities: openrouter should read'
+Write-Host '  "status": "ready" with "key_source": "vault".'
 if ($openRouterInVault) {
-    Write-Host '  OpenRouter: key is declared in Key Vault and mapped to OPENROUTER_API_KEY.'
-    Write-Host '  Rotating it is `az keyvault secret set` plus a revision restart, no redeploy.'
-} else {
-    Write-Host '  OpenRouter: no key. The server starts and reports the provider as'
-    Write-Host '  not_configured. To add one (auth on first):'
-    Write-Host "      az keyvault secret set --vault-name $vault --name openrouter-api-key --value `"<key>`""
-    Write-Host '      azd env set IMAGINE_OPENROUTER_SECRET_IN_VAULT true'
-    Write-Host '      azd up'
+    Write-Host ''
+    Write-Host '  IMAGINE_OPENROUTER_SECRET_IN_VAULT is also on, so the same secret is'
+    Write-Host '  mapped onto OPENROUTER_API_KEY as a Key Vault reference. That is'
+    Write-Host '  optional now and only refreshes on a revision restart; the vault read'
+    Write-Host '  above is what actually keeps the key current.'
 }
 
 Write-Host ''

@@ -129,7 +129,12 @@ class ExplodingProvider implements ImageProvider {
 }
 
 function provider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
-  return { enabled: true, api_key_env: "STUB_API_KEY", ...overrides };
+  return {
+    enabled: true,
+    api_key_env: "STUB_API_KEY",
+    api_key_secret: null,
+    ...overrides,
+  };
 }
 
 function config(): Config {

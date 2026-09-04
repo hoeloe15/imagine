@@ -282,21 +282,21 @@ and §6d are next, and §6 waits until after them.
 > empty. Turn authentication on (§6c, §6d) *before* you put a key in it.
 
 The template deliberately does not contain the key. It provisions the vault and
-grants the container's managed identity read access; you put the value in, once,
+grants the container's managed identity access to it; you put the value in, once,
 by hand.
 
-**Why this is two passes, and not one.** A Container Apps secret whose value is a
-Key Vault reference is resolved when the revision is created. Reference a secret
-that does not exist yet and the revision fails, taking the deployment with it. So
-the template only declares the reference once you tell it the secret is there.
-That is what the `IMAGINE_*_SECRET_IN_VAULT` flags are; the alternatives (a
-placeholder value the template would keep overwriting, or the key as a
-parameter) are both worse and are argued down in ADR 0020.
+**This is one command, and no redeploy.** The server reads the vault itself at
+the moment a call needs a key (ADR 0026), so this is the whole procedure:
 
 ```powershell
 $vault = azd env get-value AZURE_KEY_VAULT_NAME
 az keyvault secret set --vault-name $vault --name openrouter-api-key --value "<paste the key>"
 ```
+
+The next `generate_image` uses it. Values are cached for a minute, so the honest
+promise is **"ready within a minute"**, not "instantly" — and the app runs up to
+three replicas, so the one that answers your first call may not be the one that
+noticed first. Wait a minute before concluding anything went wrong.
 
 The vault is RBAC-authorized, not access-policy. Being Owner of the subscription
 does **not** give you data-plane access; the template grants **Key Vault Secrets
@@ -309,28 +309,6 @@ Azure OpenAI, if you use it, is the same command with `--name
 azure-openai-api-key`. Its endpoint is not a secret and lives in `config.json`
 under `providers.azure.endpoint`, not here.
 
-Now tell the template the secret exists, and redeploy:
-
-```powershell
-azd env set IMAGINE_OPENROUTER_SECRET_IN_VAULT true
-# and, only if you set the Azure OpenAI key too:
-# azd env set IMAGINE_AZURE_OPENAI_SECRET_IN_VAULT true
-azd up
-```
-
-The container app now declares a secret whose value is
-`https://<vault>.vault.azure.net/secrets/openrouter-api-key`, resolved by the
-user-assigned managed identity, and maps it to `OPENROUTER_API_KEY`. Confirm
-that the configuration holds a reference and not a key:
-
-```powershell
-$rg  = azd env get-value AZURE_RESOURCE_GROUP
-$app = azd env get-value AZURE_CONTAINER_APP_NAME
-az containerapp secret list --name $app --resource-group $rg -o table
-```
-
-Expect a `keyVaultUrl` column with a value and an empty `value` column.
-
 Do not put the key in a script, a `.env` file in the repo, or an `azd env`
 value. `az keyvault secret set` reads it from the command line, which means it
 lands in your PowerShell history — clear it afterwards if that matters to you:
@@ -340,25 +318,67 @@ Clear-History
 Remove-Item (Get-PSReadlineOption).HistorySavePath -ErrorAction SilentlyContinue
 ```
 
-The container reads the secret through a Key Vault reference that surfaces as the
-`OPENROUTER_API_KEY` environment variable, which is exactly what
-`providers.openrouter.api_key_env` already names — no config change (ADR 0004).
+### Check that it arrived
 
-The running revision must restart to pick up a newly set secret:
+Call `list_capabilities` from your chat client. The `openrouter` entry should
+read:
+
+```json
+{ "id": "openrouter", "status": "ready", "key_source": "vault" }
+```
+
+`key_source` is where the key came from, and it is the only thing the tool ever
+says about a key — never the value, never a fragment, not even a length. While a
+provider is still waiting, `missing` names both places you could put one:
+`["OPENROUTER_API_KEY", "vault secret openrouter-api-key"]`.
+
+**Rotation later is the same one command.** `az keyvault secret set` with a new
+value, and the next call uses it within a minute.
+
+### The `*_SECRET_IN_VAULT` flags, and why you probably do not need them
+
+There is a second, older route: have the template declare a Container Apps
+secret whose value is a *reference* to the vault, mapped onto the
+`OPENROUTER_API_KEY` environment variable.
+
+```powershell
+azd env set IMAGINE_OPENROUTER_SECRET_IN_VAULT true
+# and, only if you set the Azure OpenAI key too:
+# azd env set IMAGINE_AZURE_OPENAI_SECRET_IN_VAULT true
+azd up
+```
+
+**This is optional now, and it is no longer how the server sees the key.** It
+exists for operators who want the key to arrive as an ordinary environment
+variable — because something else in their setup reads it, or because they would
+rather the container hold no vault permissions at request time.
+
+It is also why the flags exist at all: a Key Vault reference is resolved when a
+revision is *created*, and a reference to a secret that does not exist yet fails
+the revision and takes the deployment with it. So the template only declares the
+reference once you say the secret is there. The alternatives (a placeholder the
+template would keep overwriting, or the key as a parameter) are both worse and
+are argued down in ADR 0020.
+
+If you do turn it on, confirm the configuration holds a reference and not a key:
 
 ```powershell
 $rg  = azd env get-value AZURE_RESOURCE_GROUP
 $app = azd env get-value AZURE_CONTAINER_APP_NAME
+az containerapp secret list --name $app --resource-group $rg -o table
+```
+
+Expect a `keyVaultUrl` column with a value and an empty `value` column. A key
+that arrives this way only refreshes when a revision restarts:
+
+```powershell
 az containerapp revision restart --name $app --resource-group $rg `
   --revision (az containerapp revision list --name $app --resource-group $rg --query "[0].name" -o tsv)
 ```
 
-**Rotation later is this same pair of commands and nothing else** — `az keyvault
-secret set` and a revision restart. No `azd`, no redeploy, no template change:
-the reference points at the secret's unversioned URI, so a new version is picked
-up on the next container start. That is the template's design and is still
-unverified against a live vault — correct this paragraph the first time you do
-it.
+The vault read above needs no such restart, and wins over the environment
+variable when both are present. See
+[ADR 0026](../adr/0026-runtime-provider-secrets-from-key-vault.md).
 
 ---
 
@@ -835,6 +855,68 @@ the cost log are still on the container's ephemeral disk. Both are
 > link signing are covered by unit tests with an injected `fetch`, and the
 > string-to-sign is pinned against the format Microsoft documents for service
 > version `2020-12-06`. The first real run is the test of that.
+
+## 6g. Restrict who may use it
+
+**Do this before you share the URL with anyone, and before section 7 if you took
+the WorkOS route in 6e.** With Microsoft enabled as a WorkOS *social* provider,
+any Microsoft account in the world can complete the login — the `tid` check that
+used to restrict that is skipped in issuer mode because a WorkOS token carries no
+`tid`. Until you do this, anyone who finds your URL can spend your OpenRouter
+credit.
+
+Two gates, and you want both:
+
+1. **In the WorkOS dashboard.** Add an organization and a membership rule so only
+   your own account can complete the login. Free, and it is the gate that stops
+   the login before a token is ever minted.
+2. **In the server.** `IMAGINE_ALLOWED_SUBJECTS` — the list of accounts this
+   deployment will serve, checked after the token is verified. It exists because
+   a server that is only safe because someone remembered to flick a toggle in
+   someone else's dashboard is not safe (ADR 0021, ADR 0025).
+
+```powershell
+azd env set IMAGINE_ALLOWED_SUBJECTS "email:you@example.com"
+azd up
+```
+
+**Finding the value to put in it.** Easiest first:
+
+- **Your email address**, written as `email:you@example.com`. Matched against the
+  token's verified `email` claim, ignoring case. WorkOS verifies that address for
+  social logins, which is why this is offered; it is a convenience, and it is
+  only as good as that verification.
+- **Your WorkOS user id**, which is the sturdier choice: WorkOS dashboard →
+  **Users** → your user. It looks like `user_01HBEQKA6K4QJAS93VPE39W1JT`. This is
+  the token's `sub`, and it does not change if you ever change your email.
+- **Or let the server tell you.** Set the variable to something deliberately
+  wrong, deploy, sign in from your client, and read the `403`: it names the
+  subject it refused, which is yours. Then set that.
+
+Several entries are comma-separated, and the two forms can be mixed:
+
+```powershell
+azd env set IMAGINE_ALLOWED_SUBJECTS "user_01HBEQKA6K4QJAS93VPE39W1JT, email:colleague@example.com"
+```
+
+**What you should see afterwards.** The startup banner (Container Apps → your
+app → **Log stream**) reports the state without naming anyone:
+
+```
+  allowlist:       on, 1 entry — anyone else is refused with 403
+```
+
+Your own client keeps working exactly as before. Anyone else who signs in gets a
+`403` whose body says they are not on the allowlist and names the identifier to
+add; there is no `WWW-Authenticate` on it, so no client tries to log in again in
+a loop. Each refusal writes one line to the log stream naming the caller — never
+the token.
+
+**Leave it unset and there is no allowlist**, which is what every deployment did
+before this option existed. **Setting it while `IMAGINE_AUTH_ENABLED` is false is
+a startup error**: with no verified identity to check it against it would be a
+security setting that silently does nothing, so the server refuses to start
+instead of pretending.
 
 ---
 

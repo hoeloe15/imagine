@@ -47,6 +47,9 @@
     "authAudienceOverride": {
       "value": "${IMAGINE_AUTH_AUDIENCE=}"
     },
+    "authAllowedSubjects": {
+      "value": "${IMAGINE_ALLOWED_SUBJECTS=}"
+    },
     "imagineConfigJson": {
       "value": "${IMAGINE_CONFIG_JSON=}"
     },

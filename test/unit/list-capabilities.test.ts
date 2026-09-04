@@ -12,6 +12,7 @@ import {
 } from "../../src/core/config-schema.js";
 import { ImagineError } from "../../src/core/errors.js";
 import { parseModelKnowledge, type ModelKnowledge } from "../../src/core/knowledge.js";
+import { createSecretResolver } from "../../src/core/secrets.js";
 import type { NormalisedResult, ProviderModel } from "../../src/core/types.js";
 import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import {
@@ -230,6 +231,7 @@ describe("list_capabilities", () => {
     expect(ready.models_source).toBe("live");
     expect(ready.models).toEqual(["ready/fast-1", "ready/live-only-1"]);
     expect(ready.missing).toBeUndefined();
+    expect(ready.key_source).toBe("env");
   });
 
   it("names the environment variable an unconfigured provider is waiting for", async () => {
@@ -238,8 +240,42 @@ describe("list_capabilities", () => {
 
     expect(missing.status).toBe("not_configured");
     expect(missing.missing).toEqual(["IMAGINE_TEST_MISSING_KEY"]);
+    expect(missing.key_source).toBeNull();
     expect(missing.models).toEqual(["missing/unreachable-1"]);
     expect(missing.models_source).toBe("curated");
+  });
+
+  it("reports a key that lives only in the vault as ready, from the vault", async () => {
+    const { payload } = await capabilities({
+      secrets: createSecretResolver({
+        config,
+        env: {},
+        vault: {
+          get: (name) =>
+            Promise.resolve(name === "imagine-test-ready-key" ? SECRET : null),
+          invalidate() {},
+        },
+      }),
+    });
+
+    expect(byId(payload, "ready").status).toBe("ready");
+    expect(byId(payload, "ready").key_source).toBe("vault");
+  });
+
+  it("names the vault secret too, once a vault is configured", async () => {
+    const { payload, raw } = await capabilities({
+      secrets: createSecretResolver({
+        config,
+        env: {},
+        vault: { get: () => Promise.resolve(null), invalidate() {} },
+      }),
+    });
+
+    expect(byId(payload, "missing").missing).toEqual([
+      "IMAGINE_TEST_MISSING_KEY",
+      "vault secret imagine-test-missing-key",
+    ]);
+    expect(raw).not.toContain(SECRET);
   });
 
   it("reports a disabled provider as not configured, without asking for a key", async () => {

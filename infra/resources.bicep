@@ -17,6 +17,9 @@ param authIssuer string
 param authMetadataUrl string = ''
 param authAudienceOverride string = ''
 
+@description('Comma-separated list of token subjects allowed to call this server, on top of token validation. Empty leaves the allowlist off.')
+param authAllowedSubjects string = ''
+
 @description('A config.json fragment carried in IMAGINE_CONFIG_JSON. Holds no secrets: api_key_env names variables, it never holds key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
 
@@ -144,6 +147,21 @@ resource keyVaultSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01
   scope: keyVault
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleId)
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// The server reads provider secrets from the vault at request time, and the
+// portal writes them there (ADR 0026). Azure has no write-only secret role, so
+// Officer is the narrowest built-in role that can write: read, write and delete
+// over this vault. The vault holds only this application's secrets, the write
+// path sits behind the login, and every write leaves an audit line.
+resource keyVaultSecretsOfficerForIdentity 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, identity.id, keyVaultSecretsOfficerRoleId)
+  scope: keyVault
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsOfficerRoleId)
     principalId: identity.properties.principalId
     principalType: 'ServicePrincipal'
   }
@@ -303,6 +321,18 @@ var authEnv = authEnabled
     )
   : []
 
+// Deliberately outside authEnv: the allowlist is a second gate the server
+// applies to a validated token, and it is set whenever the operator names
+// subjects — never quietly dropped because a flag elsewhere was off.
+var allowedSubjectsEnv = empty(authAllowedSubjects)
+  ? []
+  : [
+      {
+        name: 'IMAGINE_ALLOWED_SUBJECTS'
+        value: authAllowedSubjects
+      }
+    ]
+
 var providerSecrets = concat(
   openRouterSecretInVault
     ? [
@@ -326,6 +356,11 @@ var providerSecrets = concat(
 
 // api_key_env still names an environment variable (ADR 0004); a Key Vault
 // reference is how that variable gets its value here.
+//
+// Since ADR 0026 these flags are no longer needed for the server to *see* a
+// key: it reads the vault itself at request time through IMAGINE_KEY_VAULT_URL.
+// They remain for operators who prefer the key to arrive as an ordinary
+// environment variable, and for anything else that reads OPENROUTER_API_KEY.
 var providerEnv = concat(
   openRouterSecretInVault
     ? [
@@ -394,6 +429,15 @@ var containerEnv = concat(
       name: 'AZURE_CLIENT_ID'
       value: identity.properties.clientId
     }
+    // Always set, with or without a secret in the vault: it is what lets the
+    // server read a provider key at request time, so a key set with
+    // `az keyvault secret set` is live within a minute and needs no redeploy
+    // (ADR 0026). Like the blob variables, it is a value the deployment
+    // generates rather than one a person types.
+    {
+      name: 'IMAGINE_KEY_VAULT_URL'
+      value: keyVault.properties.vaultUri
+    }
   ],
   blobSinkEnv,
   empty(imagineConfigJson)
@@ -405,7 +449,8 @@ var containerEnv = concat(
         }
       ],
   providerEnv,
-  authEnv
+  authEnv,
+  allowedSubjectsEnv
 )
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
@@ -493,6 +538,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   dependsOn: [
     acrPull
     keyVaultSecretsUser
+    keyVaultSecretsOfficerForIdentity
     foundryRole
     storageBlobDataContributor
     storageBlobDelegator
