@@ -27,10 +27,10 @@ param openRouterSecretInVault bool = false
 @description('Set to true only after `az keyvault secret set --name azure-openai-api-key` has run.')
 param azureOpenAiSecretInVault bool = false
 
-@description('Turn on IMAGINE_AUTH_* on the container app. Leave false until the Entra app registration of #44 exists; the server refuses to start half-configured (ADR 0017).')
+@description('Turn on IMAGINE_AUTH_* on the container app. Leave false until there is an authority to validate against; the server refuses to start half-configured (ADR 0017).')
 param authEnabled bool = false
 
-@description('Tenant whose tokens are accepted. Defaults to the deployment tenant.')
+@description('Tenant whose tokens are accepted. Defaults to the deployment tenant in Entra mode, and is deliberately left unset in issuer mode, where there is no tid claim to check (ADR 0023).')
 param authTenantId string = ''
 
 @description('Application (client) id of the MCP app registration. Adds api://<id> as an accepted audience.')
@@ -39,11 +39,17 @@ param authClientId string = ''
 @description('Extra accepted audiences, comma separated. The deployed https://<fqdn>/mcp URL is always included.')
 param authExtraAudiences string = ''
 
-@description('Scope or app role a caller must hold.')
-param authRequiredScope string = 'access_as_user'
+@description('Scope or app role a caller must hold. Empty leaves the server default: access_as_user in Entra mode, and no scope check in issuer mode, where AuthKit publishes no custom scopes (ADR 0023).')
+param authRequiredScope string = ''
 
-@description('Accepted issuer. Empty lets the server derive it from the tenant.')
+@description('Accepted issuer. Setting this without a tenant id is what turns on issuer mode — the WorkOS AuthKit domain, for example https://your-project.authkit.app. Empty lets the server derive the issuer from the tenant.')
 param authIssuer string = ''
+
+@description('Discovery document to read the jwks_uri from. Empty derives it from the issuer, trying /.well-known/oauth-authorization-server and then /.well-known/openid-configuration.')
+param authMetadataUrl string = ''
+
+@description('Replaces the computed audience list outright. Empty keeps the computed one, which already starts with the deployed https://<fqdn>/mcp URL — the value WorkOS puts in aud when that URL is a registered resource indicator.')
+param authAudienceOverride string = ''
 
 @description('A config.json fragment for the container, as one JSON string. This is how the hosted server learns providers.azure.endpoint, deployments and auth, since the image has no config file. It holds no secrets: api_key_env names environment variables and never key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
@@ -80,6 +86,8 @@ module resources 'resources.bicep' = {
     authExtraAudiences: authExtraAudiences
     authRequiredScope: authRequiredScope
     authIssuer: authIssuer
+    authMetadataUrl: authMetadataUrl
+    authAudienceOverride: authAudienceOverride
     imagineConfigJson: imagineConfigJson
     foundryResourceId: foundryResourceId
   }

@@ -2,6 +2,7 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createSign, generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -12,14 +13,18 @@ import { parseModelKnowledge } from "../../src/core/knowledge.js";
 import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import { StubProvider } from "../../src/providers/stub.js";
 import { startHttpServer, type RunningHttpServer } from "../../src/transport/http.js";
-import type {
-  AuthOutcome,
-  AuthSettings,
-  CallerIdentity,
+import {
+  authSettingsFromEnv,
+  createAuthenticator,
+  type AuthOutcome,
+  type AuthSettings,
+  type CallerIdentity,
 } from "../../src/transport/auth.js";
+import type { FetchLike } from "../../src/transport/jwt.js";
 import {
   PROTECTED_RESOURCE_PATH,
   protectedResourceFor,
+  protectedResourceFromEnv,
 } from "../../src/transport/protected-resource.js";
 
 const knowledge = parseModelKnowledge({
@@ -214,6 +219,8 @@ describe("the same transport with authentication configured", () => {
     objectId: "oid",
     tenantId: "tenant",
     username: "mark@example.com",
+    email: "mark@example.com",
+    name: "Mark",
     clientId: null,
     scopes: ["access_as_user"],
     roles: [],
@@ -228,8 +235,9 @@ describe("the same transport with authentication configured", () => {
     issuer: "https://login.microsoftonline.com/tenant/v2.0",
     audiences: ["https://imagine.example/mcp"],
     requiredScopes: ["access_as_user"],
-    metadataUrl:
+    metadataUrls: [
       "https://login.microsoftonline.com/tenant/v2.0/.well-known/openid-configuration",
+    ],
   };
   const resource = protectedResourceFor("https://imagine.example/mcp", auth);
 
@@ -384,6 +392,151 @@ describe("the same transport with authentication configured", () => {
     const server = await guarded();
 
     expect((await fetch(server.health)).status).toBe(200);
+  });
+});
+
+// The whole point of issue #56: a token from something that is not Entra, with
+// no tid and no oid, minted for the MCP URL as its RFC 8707 resource. The
+// issuer is faked with generated keys and an injected fetch, so nothing here
+// touches the network, but every layer above the socket is the real one.
+describe("the same transport in front of a non-Entra OIDC issuer", () => {
+  const issuer = "https://imagine-test.authkit.app";
+  const jwksUri = `${issuer}/oauth2/jwks`;
+  const resourceUrl = "https://imagine.example/mcp";
+
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  const jwk = {
+    ...(publicKey.export({ format: "jwk" }) as Record<string, unknown>),
+    kid: "authkit-1",
+    use: "sig",
+    alg: "RS256",
+  };
+
+  function token(claims: Record<string, unknown> = {}): string {
+    const now = Math.floor(Date.now() / 1000);
+    const encode = (value: unknown): string =>
+      Buffer.from(JSON.stringify(value)).toString("base64url");
+    const signingInput = `${encode({ alg: "RS256", typ: "at+jwt", kid: "authkit-1" })}.${encode(
+      {
+        iss: issuer,
+        aud: resourceUrl,
+        sub: "user_01HBEQKA6K4QJAS93VPE39W1JT",
+        sid: "session_01HQSXZGF8FHF7A9ZZFCW4387R",
+        email: "mark@example.com",
+        iat: now - 30,
+        exp: now + 3600,
+        ...claims,
+      },
+    )}`;
+
+    const signer = createSign("RSA-SHA256");
+    signer.update(signingInput);
+    return `${signingInput}.${signer.sign(privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "base64url")}`;
+  }
+
+  const issuerFetch: FetchLike = (url) => {
+    // Only the RFC 8414 document exists, which is what WorkOS documents.
+    if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ issuer, jwks_uri: jwksUri }),
+      });
+    }
+    if (url === jwksUri) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ keys: [jwk] }),
+      });
+    }
+    return Promise.resolve({
+      ok: false,
+      status: 404,
+      json: () => Promise.reject(new Error("no such document")),
+    });
+  };
+
+  const env = {
+    IMAGINE_AUTH_ISSUER: issuer,
+    IMAGINE_AUTH_AUDIENCE: resourceUrl,
+    IMAGINE_MCP_RESOURCE_URI: resourceUrl,
+  };
+
+  async function serveBehindIssuer(): Promise<RunningHttpServer> {
+    const settings = authSettingsFromEnv(env);
+    if (settings === null) throw new Error("Expected authentication to be configured.");
+
+    const deps = dependencies();
+    running = await startHttpServer({
+      host: "127.0.0.1",
+      port: 0,
+      authenticate: createAuthenticator(settings, { fetch: issuerFetch }),
+      protectedResource:
+        protectedResourceFromEnv(env, settings, { mcpPath: "/mcp" }) ?? undefined,
+      createServer: () => createServer(deps),
+    });
+    return running;
+  }
+
+  it("points a client at the issuer, with no scope it cannot satisfy", async () => {
+    const server = await serveBehindIssuer();
+
+    const refusal = await fetch(server.endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+
+    expect(refusal.status).toBe(401);
+    expect(refusal.headers.get("www-authenticate")).toBe(
+      `Bearer resource_metadata="https://imagine.example${PROTECTED_RESOURCE_PATH}/mcp"`,
+    );
+
+    const document = await (
+      await fetch(`http://127.0.0.1:${server.port}${PROTECTED_RESOURCE_PATH}/mcp`)
+    ).json();
+
+    expect(document).toEqual({
+      resource: resourceUrl,
+      authorization_servers: [issuer],
+      bearer_methods_supported: ["header"],
+      resource_name: "imagine",
+    });
+  });
+
+  it("accepts its token and runs a tool with the caller attached", async () => {
+    const server = await serveBehindIssuer();
+
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(server.endpoint), {
+        requestInit: { headers: { authorization: `Bearer ${token()}` } },
+      }),
+    );
+    const { tools } = await client.listTools();
+    await client.close();
+
+    expect(tools.map((tool) => tool.name)).toContain("generate_image");
+  });
+
+  it("still refuses a token minted for another resource", async () => {
+    const server = await serveBehindIssuer();
+
+    const response = await fetch(server.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token({ aud: "https://someone-else.example/mcp" })}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toMatch(/error="invalid_token"/);
   });
 });
 

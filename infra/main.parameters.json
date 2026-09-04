@@ -36,10 +36,16 @@
       "value": "${IMAGINE_AUTH_EXTRA_AUDIENCES=}"
     },
     "authRequiredScope": {
-      "value": "${IMAGINE_AUTH_REQUIRED_SCOPE=access_as_user}"
+      "value": "${IMAGINE_AUTH_REQUIRED_SCOPE=}"
     },
     "authIssuer": {
       "value": "${IMAGINE_AUTH_ISSUER=}"
+    },
+    "authMetadataUrl": {
+      "value": "${IMAGINE_AUTH_METADATA_URL=}"
+    },
+    "authAudienceOverride": {
+      "value": "${IMAGINE_AUTH_AUDIENCE=}"
     },
     "imagineConfigJson": {
       "value": "${IMAGINE_CONFIG_JSON=}"

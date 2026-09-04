@@ -16,7 +16,9 @@ function settings(overrides: Partial<AuthSettings> = {}): AuthSettings {
     issuer: `https://login.microsoftonline.com/${TENANT}/v2.0`,
     audiences: ["https://imagine.example/mcp", `api://${TENANT}`],
     requiredScopes: [DEFAULT_REQUIRED_SCOPE],
-    metadataUrl: `https://login.microsoftonline.com/${TENANT}/v2.0/.well-known/openid-configuration`,
+    metadataUrls: [
+      `https://login.microsoftonline.com/${TENANT}/v2.0/.well-known/openid-configuration`,
+    ],
     ...overrides,
   };
 }
@@ -91,6 +93,34 @@ describe("protectedResourceFor", () => {
     expect(resource.metadataUrl).toBe(
       `https://imagine.example${PROTECTED_RESOURCE_PATH}/mcp`,
     );
+  });
+
+  it("names the configured issuer, whoever that is, in issuer mode", () => {
+    const workos = protectedResourceFor(
+      "https://imagine.example/mcp",
+      settings({
+        tenantId: null,
+        issuer: "https://imagine-test.authkit.app",
+        requiredScopes: [],
+        metadataUrls: [
+          "https://imagine-test.authkit.app/.well-known/oauth-authorization-server",
+        ],
+      }),
+    );
+
+    expect(workos.document.authorization_servers).toEqual([
+      "https://imagine-test.authkit.app",
+    ]);
+  });
+
+  it("omits scopes_supported entirely when no scope is required", () => {
+    const open = protectedResourceFor(
+      "https://imagine.example/mcp",
+      settings({ tenantId: null, requiredScopes: [] }),
+    );
+
+    expect(open.document.scopes_supported).toBeUndefined();
+    expect(Object.keys(open.document)).not.toContain("scopes_supported");
   });
 
   it("carries every configured scope through", () => {

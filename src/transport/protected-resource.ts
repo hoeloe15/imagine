@@ -21,7 +21,9 @@ export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
 export interface ProtectedResourceMetadata {
   resource: string;
   authorization_servers: readonly string[];
-  scopes_supported: readonly string[];
+  /** Omitted when no scope is required: RFC 9728 makes it optional, and an
+   * empty list would tell a client to ask for nothing in particular twice. */
+  scopes_supported?: readonly string[];
   bearer_methods_supported: readonly string[];
   resource_name: string;
 }
@@ -97,10 +99,14 @@ export function protectedResourceFor(
     document: Object.freeze({
       resource: canonical,
       // Claude uses the first entry and does not fall back to later ones, so
-      // there is exactly one: the tenant's v2.0 issuer, which serves OpenID
-      // Connect discovery at its own well-known path.
+      // there is exactly one: the configured issuer, which serves its own
+      // discovery document at its own well-known path. In Entra mode that is
+      // the tenant's v2.0 issuer; in issuer mode it is the AuthKit domain, and
+      // that is the whole of what makes "add it by URL alone" work.
       authorization_servers: Object.freeze([auth.issuer]),
-      scopes_supported: Object.freeze([...auth.requiredScopes]),
+      ...(auth.requiredScopes.length > 0
+        ? { scopes_supported: Object.freeze([...auth.requiredScopes]) }
+        : {}),
       bearer_methods_supported: Object.freeze(["header"]),
       resource_name: "imagine",
     }),

@@ -197,8 +197,13 @@ export type FetchLike = (
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
 export interface SigningKeysOptions {
-  /** The tenant's OpenID configuration document. */
-  metadataUrl: string;
+  /**
+   * Discovery documents to try, in order, until one advertises a `jwks_uri`.
+   * There is more than one because issuers differ on which well-known path they
+   * publish: Entra has OpenID Connect discovery, WorkOS AuthKit documents only
+   * the RFC 8414 authorization-server document.
+   */
+  metadataUrls: readonly string[];
   fetch?: FetchLike;
   now?: () => number;
   cacheTtlMs?: number;
@@ -227,8 +232,11 @@ export class SigningKeys {
   #jwksUri: string | null = null;
 
   constructor(options: SigningKeysOptions) {
+    if (options.metadataUrls.length === 0) {
+      throw new Error("SigningKeys needs at least one discovery document URL.");
+    }
     this.#options = {
-      metadataUrl: options.metadataUrl,
+      metadataUrls: options.metadataUrls,
       fetch: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
       now: options.now ?? Date.now,
       cacheTtlMs: options.cacheTtlMs ?? DEFAULT_JWKS_CACHE_TTL_MS,
@@ -252,7 +260,7 @@ export class SigningKeys {
     }
 
     throw new TokenRejected(
-      `The token names signing key ${kid}, which the tenant does not publish.`,
+      `The token names signing key ${kid}, which the authorization server does not publish.`,
     );
   }
 
@@ -264,10 +272,7 @@ export class SigningKeys {
   }
 
   async #load(): Promise<void> {
-    this.#jwksUri ??= jwksUriFrom(
-      await this.#get(this.#options.metadataUrl),
-      this.#options.metadataUrl,
-    );
+    this.#jwksUri ??= await this.#discoverJwksUri();
 
     const document = await this.#get(this.#jwksUri);
     const keys = (document as { keys?: unknown }).keys;
@@ -283,6 +288,30 @@ export class SigningKeys {
 
     this.#keys = usable;
     this.#fetchedAt = this.#options.now();
+  }
+
+  /**
+   * The first configured document that answers and names a `jwks_uri` wins; the
+   * others exist because issuers publish different well-known paths, so a
+   * failure on one of them is a miss and not an outage. Only when every one has
+   * failed is the reason reported, and it is the last one's.
+   */
+  async #discoverJwksUri(): Promise<string> {
+    let lastFailure: unknown;
+
+    for (const url of this.#options.metadataUrls) {
+      try {
+        return jwksUriFrom(await this.#get(url), url);
+      } catch (failure) {
+        lastFailure = failure;
+      }
+    }
+
+    throw lastFailure instanceof Error
+      ? lastFailure
+      : new KeysUnavailable(
+          `None of ${this.#options.metadataUrls.join(", ")} advertises a jwks_uri.`,
+        );
   }
 
   async #get(url: string): Promise<unknown> {

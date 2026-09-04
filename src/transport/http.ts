@@ -318,9 +318,11 @@ function challengeParams(
   if (options.challengeParams) return options.challengeParams;
   if (!options.protectedResource) return undefined;
 
+  const scopes = options.protectedResource.document.scopes_supported ?? [];
+
   return {
     resource_metadata: options.protectedResource.metadataUrl,
-    scope: options.protectedResource.document.scopes_supported.join(" "),
+    ...(scopes.length > 0 ? { scope: scopes.join(" ") } : {}),
   };
 }
 

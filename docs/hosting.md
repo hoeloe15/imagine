@@ -62,10 +62,11 @@ open so probes keep working.
 | `IMAGINE_AUTH_AUDIENCE`       | *(required once auth is on)*                        | Accepted `aud`, comma-separated. Include the MCP URL itself          |
 | `IMAGINE_AUTH_ISSUER`         | `https://login.microsoftonline.com/<tenant>/v2.0`   | Accepted `iss`                                                       |
 | `IMAGINE_AUTH_REQUIRED_SCOPE` | `access_as_user`                                    | Accepted `scp` entries or app `roles` entries; any one is enough     |
+| `IMAGINE_AUTH_METADATA_URL`   | *(the tenant's OpenID configuration)*               | Where the signing keys are discovered, if you need to override it     |
 
 With none of them set the endpoint is open, exactly as before. With some of them
-set but not the tenant or the audience, the server refuses to start rather than
-quietly serving an open endpoint.
+set but neither an authority (a tenant or an issuer) nor an audience, the server
+refuses to start rather than quietly serving an open endpoint.
 
 A request with no token, an expired one, one minted for another audience, tenant
 or issuer, or one whose signature does not check out gets a `401` with a
@@ -83,6 +84,61 @@ Registering the app in Entra — including the Application ID URI trap that make
 the MCP URL itself a valid audience — is in
 [docs/deploy/azure-wizard.md](deploy/azure-wizard.md); the reasoning is in
 [ADR 0017](adr/0017-entra-bearer-token-validation.md).
+
+## Using WorkOS AuthKit (or any OIDC issuer) as the login front
+
+Entra is a fine identity provider and a poor *authorization server* for hosted
+chat clients: it has no dynamic client registration, so claude.ai, Cowork and
+Mistral Le Chat cannot register themselves and stop with "this connector does
+not support Dynamic Client Registration". Anyone you share the URL with then
+needs a hand-made app registration and a client secret.
+
+The fix is to put an authorization server that *does* support it in front, and
+keep Microsoft as the way people actually log in. That is **issuer mode**: set
+`IMAGINE_AUTH_ISSUER` to the front's issuer URL and leave
+`IMAGINE_AUTH_TENANT_ID` unset. Nothing in the server is WorkOS-specific — any
+issuer that publishes a discovery document and signs RSA JWTs works — but WorkOS
+AuthKit is the one the runbook walks through, and Microsoft is a free social
+provider there rather than a paid enterprise connection.
+
+```sh
+IMAGINE_AUTH_ISSUER=https://your-project.authkit.app
+IMAGINE_AUTH_AUDIENCE=https://your-host/mcp
+```
+
+What changes when the tenant is unset:
+
+- **Discovery comes from the issuer.** The server asks
+  `<issuer>/.well-known/oauth-authorization-server` first and
+  `<issuer>/.well-known/openid-configuration` second, and reads the `jwks_uri`
+  out of whichever answers. `IMAGINE_AUTH_METADATA_URL` overrides both.
+- **The tenant check is skipped**, because there is no `tid` claim on such a
+  token — it is skipped, not defaulted to something no token could match. The
+  startup banner says so in as many words.
+- **No scope is required by default.** AuthKit publishes only
+  `openid`, `profile`, `email` and `offline_access`, so demanding
+  `access_as_user` would break the login before it started. Authorization is
+  then "this issuer signed it, for this exact resource URL". Set
+  `IMAGINE_AUTH_REQUIRED_SCOPE` if your issuer does mint a scope you want to
+  insist on, and it is enforced exactly as in Entra mode.
+- **The `aud` still has to be your MCP URL.** WorkOS honours RFC 8707 resource
+  indicators and stamps the requested `resource` into `aud` — but only if that
+  URL is registered as a **Resource Indicator** in the WorkOS dashboard.
+  Without that it uses an environment-wide default audience and every call
+  becomes a `401`. This is the single most likely thing to go wrong.
+- **The discovery document points at the issuer.** `authorization_servers` in
+  `/.well-known/oauth-protected-resource/mcp` becomes the AuthKit domain, which
+  is how a client finds the registration endpoint it needs and why the URL alone
+  is enough.
+
+One consequence to decide deliberately rather than discover: with Microsoft as
+a social provider, *any* Microsoft account can log in unless you restrict
+membership inside AuthKit. The `tid` check is no longer doing that job for you.
+
+The dashboard checklist, the `azd` commands and the verification steps are in
+[docs/deploy/azure-wizard.md §6e](deploy/azure-wizard.md); the reasoning, and
+what was and was not verified from WorkOS's own documentation, is in
+[ADR 0023](adr/0023-oidc-issuer-mode.md).
 
 One caveat worth knowing before you share the URL with a colleague:
 `budget.max_usd_per_session` is enforced per process, so over HTTP it becomes a

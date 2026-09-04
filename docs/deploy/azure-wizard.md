@@ -587,6 +587,144 @@ work out its own public URL — §7b says what to look at.
 
 ---
 
+## 6e. Or: WorkOS AuthKit in front, so the URL alone is enough
+
+**Take this route instead of 6c/6d if you want to share the endpoint with
+people by sending them the URL.** Sections 6c and 6d give you an endpoint that
+Claude Code can use with a token from the Azure CLI, and that hosted clients can
+only use if you hand-register an OAuth client for each of them. Entra has no
+dynamic client registration, so claude.ai, Cowork and Mistral Le Chat stop at
+"this connector does not support Dynamic Client Registration".
+
+WorkOS AuthKit becomes the authorization server; Microsoft stays the way people
+log in, as a free social provider. The server does not know it is WorkOS — this
+is "issuer mode", ADR 0023 — so any DCR-capable OIDC issuer would do.
+
+**You need the deployed MCP URL before you start.** It is the exact string the
+dashboard wants:
+
+```powershell
+azd env get-value MCP_RESOURCE_URI     # https://ca-imagine-....azurecontainerapps.io/mcp
+```
+
+### The WorkOS dashboard checklist
+
+Every step is in the WorkOS dashboard at <https://dashboard.workos.com>, in the
+environment you intend to use (Staging and Production are separate; use
+Production for a real deployment, and note that its AuthKit domain differs).
+
+1. **Create a WorkOS account and a project**, if you have none. The free tier
+   covers a million monthly active users; nothing here needs a paid plan.
+2. **AuthKit → note the AuthKit domain.** It looks like
+   `your-project.authkit.app`. Your issuer is that with `https://` in front:
+   `https://your-project.authkit.app`. **This is value ① to hand back.**
+3. **Authentication → enable "Microsoft OAuth"** as a login method. This is the
+   free *social* provider, not the paid Enterprise SSO connection — do not buy
+   an SSO connection unless you specifically need tenant-restricted login.
+   *(Whether WorkOS requires you to register your own Microsoft OAuth
+   application, or provides shared credentials, could not be confirmed from
+   their documentation — follow whatever the dashboard asks for on that screen.
+   If it does ask for a client id and secret, that is an Entra **app
+   registration** with the redirect URI WorkOS shows you, and it is the only
+   Entra-side action this route needs.)*
+4. **Connect → Configuration → MCP Auth: turn on "Client ID Metadata Document
+   (CIMD)".** Off by default. This is what the 2026-07-28 MCP revision prefers.
+5. **Connect → Configuration → MCP Auth: turn on "Dynamic Client Registration
+   (DCR)"** as well, for clients that do not do CIMD yet — Mistral Le Chat is
+   documented as a DCR client.
+6. **Add your MCP URL as a Resource Indicator**, pasting the
+   `MCP_RESOURCE_URI` value exactly: `https`, the FQDN, `/mcp`, no trailing
+   slash. **Do not skip this.** Without it AuthKit issues tokens with an
+   environment-wide default audience, this server refuses them, and the only
+   symptom is a `401` after a successful login. Optionally open the `…` menu
+   next to it and **Set as default**.
+7. **Note whether the dashboard offers a "default resource indicator"** and
+   what audience it uses; if you ever see `401`s after a clean login, this is
+   the first thing to re-check.
+
+Two values come back from all of that:
+
+| ① AuthKit issuer | `https://<your-project>.authkit.app` |
+| ② MCP URL registered as a Resource Indicator | the `MCP_RESOURCE_URI` string, confirmed present in the dashboard |
+
+No client id and no client secret: that is the entire point. The chat clients
+register themselves.
+
+### Point the deployment at it
+
+```powershell
+azd env set IMAGINE_AUTH_ENABLED true
+azd env set IMAGINE_AUTH_ISSUER https://your-project.authkit.app
+azd env set IMAGINE_AUTH_TENANT_ID ""
+azd env set IMAGINE_AUTH_REQUIRED_SCOPE ""
+azd up
+```
+
+`IMAGINE_AUTH_TENANT_ID` **must be empty**: an issuer plus a tenant means "an
+Entra tenant reachable at a different issuer URL", and the `tid` check would
+then reject every WorkOS token. With it empty the template sets no tenant
+variable at all and the server skips that check by design.
+
+`IMAGINE_AUTH_REQUIRED_SCOPE` **must be empty too**. AuthKit publishes only
+`openid`, `profile`, `email` and `offline_access`; asking for `access_as_user`
+would fail the login at the authorization request, before this server ever sees
+a token.
+
+The audience needs nothing: the template already puts `https://<fqdn>/mcp` first
+in `IMAGINE_AUTH_AUDIENCE`, and that is precisely what WorkOS stamps into `aud`
+for the resource indicator you registered. Two optional variables exist if you
+ever need them:
+
+```powershell
+azd env set IMAGINE_AUTH_METADATA_URL https://your-project.authkit.app/.well-known/oauth-authorization-server
+azd env set IMAGINE_AUTH_AUDIENCE https://your-host/mcp   # replaces the computed list outright
+```
+
+Neither is normally needed — discovery is derived from the issuer, trying
+`/.well-known/oauth-authorization-server` and then
+`/.well-known/openid-configuration`.
+
+### Verify it
+
+```powershell
+$fqdn = azd env get-value MCP_ENDPOINT_URL
+
+# 1. The issuer really is an authorization server, and it registers clients.
+curl.exe -s "https://your-project.authkit.app/.well-known/oauth-authorization-server"
+
+# 2. Our document points at it.
+curl.exe -s "$fqdn/.well-known/oauth-protected-resource/mcp"
+
+# 3. The endpoint still refuses an anonymous call, and points at (2).
+curl.exe -i -X POST "$fqdn/mcp" -H "Content-Type: application/json" -d "{}"
+```
+
+Check 1 must show a `registration_endpoint` (that is DCR) and `"none"` in
+`token_endpoint_auth_methods_supported` (that is what lets a public client
+register without a secret). Check 2 must show
+`"authorization_servers": ["https://your-project.authkit.app"]` and a
+`resource` equal to your endpoint URL exactly. Check 3 must be a `401` with
+`WWW-Authenticate: Bearer resource_metadata="…"` — note that in this mode there
+is deliberately no `scope=` in the challenge.
+
+The container's logs should show `AUTHENTICATED: every POST to /mcp needs a
+bearer token from the issuer below`, with
+`tenant: none configured, so the tid claim is not checked` and
+`required scope: none` under it.
+
+Then the actual test, and the reason for all of it: in **Mistral Le Chat** or
+**claude.ai** (Settings → Connectors → Add custom connector), paste
+`https://<fqdn>/mcp` and nothing else. No client id, no secret. It should send
+you to a WorkOS login page, offer "Continue with Microsoft", and come back
+connected.
+
+> **Not yet executed live.** As of 2026-09-04 nobody has run this route against
+> a real WorkOS account and a real deployment. The server side is covered by
+> tests against a fake issuer; the dashboard labels above come from WorkOS's
+> documentation on 2026-09-04 and may be worded differently on screen.
+
+---
+
 ## 7. Verify the deployed endpoint
 
 Three checks, in order. Do not skip to the client until all three pass — the
@@ -759,7 +897,9 @@ itself:
 ### claude.ai and Claude Desktop — a custom connector
 
 These need real OAuth, not a header. Entra does not offer dynamic client
-registration in the shape Claude wants, so the working route is a
+registration in the shape Claude wants, so there are two routes: **§6e**, which
+puts WorkOS AuthKit in front and lets the client register itself so the URL
+alone is enough, or — staying on Entra — a
 **pre-registered OAuth client**: create a second app registration for the client,
 consent it to the API's `access_as_user` scope, and paste its Client ID (and
 secret, if you make it confidential) into **Advanced settings** when adding the
@@ -874,6 +1014,11 @@ Not exercised on 2026-09-03, and still a guess until someone runs it.
       the custom-connector login against this endpoint (#36, #48, ADR 0021).
       The server side is verified (§7b); Claude's own client-side behaviour
       against a live tenant is not.
+- [ ] The whole of §6e: a real WorkOS account, the dashboard toggles as they are
+      actually labelled, whether an AuthKit domain also serves
+      `/.well-known/openid-configuration`, whether Microsoft social login needs
+      an Entra app registration of its own, and whether a hosted client really
+      does add the connector with only the URL (#56, ADR 0023).
 - [ ] Whether `predown` actually runs on `azd down --purge` before the resources
       go, and deletes the registration it created (§9).
 - [ ] Actual monthly cost.

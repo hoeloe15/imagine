@@ -14,6 +14,8 @@ param authClientId string
 param authExtraAudiences string
 param authRequiredScope string
 param authIssuer string
+param authMetadataUrl string = ''
+param authAudienceOverride string = ''
 
 @description('A config.json fragment carried in IMAGINE_CONFIG_JSON. Holds no secrets: api_key_env names variables, it never holds key values (ADR 0004, ADR 0022).')
 param imagineConfigJson string = ''
@@ -170,30 +172,54 @@ var mcpResourceUri = '${mcpEndpointUrl}/mcp'
 // arrived with aud=<id>. The bare id is the audience that actually matches.
 var apiAudience = empty(authClientId) ? '' : ',api://${authClientId},${authClientId}'
 var extraAudience = empty(authExtraAudiences) ? '' : ',${authExtraAudiences}'
-var authAudiences = '${mcpResourceUri}${apiAudience}${extraAudience}'
+var computedAudiences = '${mcpResourceUri}${apiAudience}${extraAudience}'
+var authAudiences = empty(authAudienceOverride) ? computedAudiences : authAudienceOverride
+
+// An issuer without a tenant id is issuer mode (ADR 0023): the front is a
+// non-Entra OIDC authorization server such as WorkOS AuthKit, there is no `tid`
+// claim to check, and defaulting the tenant to the subscription's would turn a
+// skipped check into a check no token can ever pass.
+var issuerMode = !empty(authIssuer) && empty(authTenantId)
+var effectiveTenantId = empty(authTenantId) ? subscription().tenantId : authTenantId
 
 var authEnv = authEnabled
   ? concat(
       [
         {
-          name: 'IMAGINE_AUTH_TENANT_ID'
-          value: empty(authTenantId) ? subscription().tenantId : authTenantId
-        }
-        {
           name: 'IMAGINE_AUTH_AUDIENCE'
           value: authAudiences
         }
-        {
-          name: 'IMAGINE_AUTH_REQUIRED_SCOPE'
-          value: authRequiredScope
-        }
       ],
+      issuerMode
+        ? []
+        : [
+            {
+              name: 'IMAGINE_AUTH_TENANT_ID'
+              value: effectiveTenantId
+            }
+          ],
       empty(authIssuer)
         ? []
         : [
             {
               name: 'IMAGINE_AUTH_ISSUER'
               value: authIssuer
+            }
+          ],
+      empty(authMetadataUrl)
+        ? []
+        : [
+            {
+              name: 'IMAGINE_AUTH_METADATA_URL'
+              value: authMetadataUrl
+            }
+          ],
+      empty(authRequiredScope)
+        ? []
+        : [
+            {
+              name: 'IMAGINE_AUTH_REQUIRED_SCOPE'
+              value: authRequiredScope
             }
           ]
     )

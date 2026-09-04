@@ -84,7 +84,7 @@ function unauthenticatedNotice(): string[] {
   return [
     "  !! THIS ENDPOINT IS UNAUTHENTICATED. Anyone who can reach it can spend",
     "  !! your provider credits and read the images it writes. Set the",
-    "  !! IMAGINE_AUTH_* variables to require a Microsoft Entra ID token; until",
+    "  !! IMAGINE_AUTH_* variables to require a verified bearer token; until",
     "  !! you do, keep this bound to 127.0.0.1 or put an authenticating proxy",
     "  !! in front of it.",
   ];
@@ -92,11 +92,18 @@ function unauthenticatedNotice(): string[] {
 
 function authenticatedNotice(auth: AuthSettings): string[] {
   return [
-    "  AUTHENTICATED: every POST to /mcp needs a Microsoft Entra ID bearer token.",
-    `  tenant:          ${auth.tenantId}`,
+    auth.tenantId === null
+      ? "  AUTHENTICATED: every POST to /mcp needs a bearer token from the issuer below."
+      : "  AUTHENTICATED: every POST to /mcp needs a Microsoft Entra ID bearer token.",
+    auth.tenantId === null
+      ? "  tenant:          none configured, so the tid claim is not checked"
+      : `  tenant:          ${auth.tenantId}`,
     `  issuer:          ${auth.issuer}`,
+    `  discovery:       ${auth.metadataUrls.join(", ")}`,
     `  audience:        ${auth.audiences.join(", ")}`,
-    `  required scope:  ${auth.requiredScopes.join(" or ")}`,
+    auth.requiredScopes.length === 0
+      ? "  required scope:  none — any token this issuer minted for this resource is accepted"
+      : `  required scope:  ${auth.requiredScopes.join(" or ")}`,
     "  /healthz stays open, so probes and load balancers keep working.",
   ];
 }

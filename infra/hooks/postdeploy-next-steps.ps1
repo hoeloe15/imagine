@@ -49,7 +49,24 @@ Write-Host "  Endpoint: $mcpUrl"
 Write-Host "  Health:   ${endpoint}/healthz  (open with or without auth)"
 Write-Host ''
 
-if ($authEnabled) {
+$authIssuer = Get-AzdValue 'IMAGINE_AUTH_ISSUER'
+$authTenant = Get-AzdValue 'IMAGINE_AUTH_TENANT_ID'
+$issuerMode = $authIssuer -and -not $authTenant
+
+if ($authEnabled -and $issuerMode) {
+    Write-Host "  Authentication: ON, in issuer mode. Every POST to /mcp needs a bearer"
+    Write-Host "  token from $authIssuer, which this server verifies itself."
+    Write-Host ''
+    Write-Host "    Login discovery: ${endpoint}/.well-known/oauth-protected-resource/mcp"
+    Write-Host ''
+    Write-Host '    Cowork / claude.ai / Mistral Le Chat: add a custom connector with'
+    Write-Host '    this URL and nothing else - no client id, no secret:'
+    Write-Host "      $mcpUrl"
+    Write-Host ''
+    Write-Host '    In the issuer dashboard, this exact URL must be registered as a'
+    Write-Host '    resource indicator, or every token comes back with the wrong'
+    Write-Host '    audience and this server answers 401. Runbook section 6e.'
+} elseif ($authEnabled) {
     Write-Host '  Authentication: ON. Every POST to /mcp needs a Microsoft Entra ID'
     Write-Host '  bearer token that this server verifies itself.'
     Write-Host ''

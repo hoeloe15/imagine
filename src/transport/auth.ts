@@ -1,14 +1,23 @@
 /**
- * Bearer-token authentication for `/mcp`, against Microsoft Entra ID.
+ * Bearer-token authentication for `/mcp`.
  *
- * The endpoint is either open or it is guarded: with none of the four
+ * The endpoint is either open or it is guarded: with none of the
  * `IMAGINE_AUTH_*` variables set, {@link authSettingsFromEnv} returns `null` and
  * the transport behaves exactly as it did before this module existed. With any
  * of them set, every POST must carry a token this server has verified itself —
  * signature, issuer, audience, tenant, lifetime and scope — before a tool runs.
  *
- * See ADR 0017 for the reasoning, and `docs/research/remote-mcp-2026-08.md` §3
- * for how the Claude clients actually present a token.
+ * There are two modes and one code path. **Entra mode** is chosen by
+ * `IMAGINE_AUTH_TENANT_ID`: discovery and the `tid` check are the tenant's.
+ * **Issuer mode** is chosen by `IMAGINE_AUTH_ISSUER` without a tenant: discovery
+ * comes from the issuer's own well-known documents and there is no tenant claim
+ * to check, so that check is skipped rather than defaulted. Any OIDC or RFC 8414
+ * issuer that signs RSA JWTs fits; WorkOS AuthKit is the one ADR 0023 was
+ * written for.
+ *
+ * See ADR 0017 for the validation rules, ADR 0023 for issuer mode, and
+ * `docs/research/remote-mcp-2026-08.md` §3 for how the Claude clients actually
+ * present a token.
  */
 
 import type { Env } from "../core/config.js";
@@ -26,14 +35,26 @@ export const DEFAULT_REQUIRED_SCOPE = "access_as_user";
 export const DEFAULT_CLOCK_SKEW_SECONDS = 60;
 export const ENTRA_LOGIN_HOST = "https://login.microsoftonline.com";
 
+/** RFC 8414 first, then OpenID Connect: issuers publish one, the other, or both. */
+export const DISCOVERY_PATHS = Object.freeze([
+  "/.well-known/oauth-authorization-server",
+  "/.well-known/openid-configuration",
+]);
+
 export interface AuthSettings {
-  tenantId: string;
+  /** The Entra tenant, or `null` in issuer mode, where the `tid` check is skipped. */
+  tenantId: string | null;
   issuer: string;
   /** Accepted `aud` values, canonicalised. Usually one resource URI. */
   audiences: readonly string[];
-  /** Accepted `scp` entries or `roles` entries; any one of them is enough. */
+  /**
+   * Accepted `scp` entries or `roles` entries; any one of them is enough. Empty
+   * means the issuer's own login is the whole authorization decision — which is
+   * the default in issuer mode, because AuthKit publishes no custom scopes.
+   */
   requiredScopes: readonly string[];
-  metadataUrl: string;
+  /** Discovery documents to try, in order, for the `jwks_uri`. */
+  metadataUrls: readonly string[];
 }
 
 /**
@@ -43,12 +64,17 @@ export interface AuthSettings {
  * and per-caller budgets off `callerId`.
  */
 export interface CallerIdentity {
-  /** Stable per (user or service principal, tenant). The ledger key. */
+  /**
+   * Stable per (user or service principal, tenant) in Entra mode, and per
+   * (issuer, subject) in issuer mode. The ledger key.
+   */
   callerId: string;
   subject: string;
   objectId: string | null;
   tenantId: string | null;
   username: string | null;
+  email: string | null;
+  name: string | null;
   /** The calling application's own id, for tokens minted by an agent. */
   clientId: string | null;
   scopes: readonly string[];
@@ -85,31 +111,75 @@ export function authSettingsFromEnv(env: Env): AuthSettings | null {
   const issuer = trimmed(env.IMAGINE_AUTH_ISSUER);
   const audience = trimmed(env.IMAGINE_AUTH_AUDIENCE);
   const requiredScope = trimmed(env.IMAGINE_AUTH_REQUIRED_SCOPE);
+  const metadataUrl = trimmed(env.IMAGINE_AUTH_METADATA_URL);
 
-  if (!tenantId && !issuer && !audience && !requiredScope) return null;
+  if (!tenantId && !issuer && !audience && !requiredScope && !metadataUrl) return null;
 
-  if (!tenantId) {
+  if (!tenantId && !issuer) {
     throw new Error(
-      "IMAGINE_AUTH_TENANT_ID is required once any other IMAGINE_AUTH_* variable is set. Unset them all to run the endpoint unauthenticated.",
+      "Authentication needs an authority: set IMAGINE_AUTH_TENANT_ID for a Microsoft Entra tenant, or IMAGINE_AUTH_ISSUER for any other OIDC issuer (the WorkOS AuthKit domain, for example). Unset every IMAGINE_AUTH_* variable to run the endpoint unauthenticated.",
     );
   }
 
   const audiences = splitList(audience).map(canonicalAudience);
   if (audiences.length === 0) {
     throw new Error(
-      "IMAGINE_AUTH_AUDIENCE is required when authentication is on. Set it to the resource this server accepts tokens for — the Application ID URI of its Entra app registration, which must include the MCP endpoint URL itself.",
+      "IMAGINE_AUTH_AUDIENCE is required when authentication is on. Set it to the resource this server accepts tokens for, which must include the MCP endpoint URL itself.",
     );
   }
 
   const scopes = splitList(requiredScope);
 
   return {
-    tenantId,
+    tenantId: tenantId || null,
     issuer: issuer || `${ENTRA_LOGIN_HOST}/${tenantId}/v2.0`,
     audiences,
-    requiredScopes: scopes.length > 0 ? scopes : [DEFAULT_REQUIRED_SCOPE],
-    metadataUrl: `${ENTRA_LOGIN_HOST}/${tenantId}/v2.0/.well-known/openid-configuration`,
+    requiredScopes:
+      scopes.length > 0 ? scopes : tenantId ? [DEFAULT_REQUIRED_SCOPE] : [],
+    metadataUrls: discoveryUrls({ tenantId, issuer, metadataUrl }),
   };
+}
+
+/**
+ * An explicit URL wins. A tenant means Entra, whose OpenID configuration is
+ * where it has always been — an explicit `IMAGINE_AUTH_ISSUER` in that mode
+ * names an alternative `iss` (`sts.windows.net`), not another authority. Only
+ * with no tenant at all is discovery derived from the issuer, and then both
+ * well-known documents are tried: WorkOS documents the RFC 8414 one and says
+ * nothing about the OpenID Connect one.
+ */
+function discoveryUrls(configured: {
+  tenantId: string;
+  issuer: string;
+  metadataUrl: string;
+}): readonly string[] {
+  if (configured.metadataUrl) return Object.freeze([configured.metadataUrl]);
+
+  if (configured.tenantId) {
+    return Object.freeze([
+      `${ENTRA_LOGIN_HOST}/${configured.tenantId}/v2.0/.well-known/openid-configuration`,
+    ]);
+  }
+
+  const base = issuerOrigin(configured.issuer);
+  return Object.freeze(DISCOVERY_PATHS.map((path) => `${base}${path}`));
+}
+
+function issuerOrigin(issuer: string): string {
+  let url: URL;
+  try {
+    url = new URL(issuer);
+  } catch {
+    throw new Error(
+      `IMAGINE_AUTH_ISSUER must be an absolute https URL, not ${JSON.stringify(issuer)}. For WorkOS AuthKit that is https://<your-project>.authkit.app.`,
+    );
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(
+      `IMAGINE_AUTH_ISSUER must be an http or https URL, not ${JSON.stringify(issuer)}.`,
+    );
+  }
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
 }
 
 export function createAuthenticator(
@@ -117,7 +187,7 @@ export function createAuthenticator(
   options: AuthenticatorOptions = {},
 ): Authenticator {
   const keys = new SigningKeys({
-    metadataUrl: settings.metadataUrl,
+    metadataUrls: settings.metadataUrls,
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.cacheTtlMs !== undefined ? { cacheTtlMs: options.cacheTtlMs } : {}),
@@ -135,8 +205,7 @@ export function createAuthenticator(
         ok: false,
         status: 401,
         error: null,
-        message:
-          "Authentication required. Send an Authorization: Bearer <token> header with a Microsoft Entra ID access token for this server.",
+        message: `Authentication required. Send an Authorization: Bearer <token> header with an access token this server's authorization server (${settings.issuer}) minted for it.`,
       };
     }
     if (token === "") {
@@ -173,7 +242,7 @@ export function createAuthenticator(
           ok: false,
           status: 503,
           error: null,
-          message: `The token could not be checked because the tenant's signing keys are unreachable: ${error.message}`,
+          message: `The token could not be checked because the authorization server's signing keys are unreachable: ${error.message}`,
         };
       }
       throw error;
@@ -223,7 +292,11 @@ async function validate(
   }
 
   const tenantId = stringClaim(claims, "tid");
-  if (tenantId !== null && tenantId !== settings.tenantId) {
+  if (
+    settings.tenantId !== null &&
+    tenantId !== null &&
+    tenantId !== settings.tenantId
+  ) {
     throw new TokenRejected(
       `The token comes from tenant ${tenantId}, and this server serves tenant ${settings.tenantId}.`,
     );
@@ -245,23 +318,34 @@ async function validate(
   const scopes = scopesOf(claims);
   const roles = rolesOf(claims);
   const granted = [...scopes, ...roles];
-  if (!settings.requiredScopes.some((required) => granted.includes(required))) {
+  if (
+    settings.requiredScopes.length > 0 &&
+    !settings.requiredScopes.some((required) => granted.includes(required))
+  ) {
     throw new InsufficientScope(
-      `The token carries none of the required permissions (${settings.requiredScopes.join(", ")}). Grant the delegated scope or the app role on the Entra app registration and consent to it.`,
+      `The token carries none of the required permissions (${settings.requiredScopes.join(", ")}). Grant that scope or app role on the authorization server and consent to it.`,
     );
   }
 
   const subject = stringClaim(claims, "sub") ?? "";
   const objectId = stringClaim(claims, "oid");
+  const email = stringClaim(claims, "email");
   const username =
-    stringClaim(claims, "preferred_username") ?? stringClaim(claims, "upn");
+    stringClaim(claims, "preferred_username") ?? stringClaim(claims, "upn") ?? email;
+  const tenant = tenantId ?? settings.tenantId;
 
   return Object.freeze({
-    callerId: `${tenantId ?? settings.tenantId}:${objectId ?? subject}`,
+    // Entra gives a tenant and an object id; an issuer that gives neither is
+    // still identified by the pair that OIDC guarantees to be stable, and the
+    // cost ledger of issue #45 keys off exactly this string.
+    callerId:
+      tenant === null ? `${issuer}:${subject}` : `${tenant}:${objectId ?? subject}`,
     subject,
     objectId,
     tenantId,
     username,
+    email,
+    name: stringClaim(claims, "name"),
     clientId: stringClaim(claims, "azp") ?? stringClaim(claims, "appid"),
     scopes,
     roles,

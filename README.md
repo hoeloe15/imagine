@@ -155,6 +155,12 @@ for each.
 `https://<fqdn>/mcp` by URL, and Claude reads the server's protected-resource
 document, discovers your tenant and shows the Microsoft login itself.
 
+**Sharing it by URL alone** — no client id, no secret, in claude.ai, Cowork or
+Mistral Le Chat — needs an authorization server that lets those clients register
+themselves, which Entra does not do. Put WorkOS AuthKit in front, keep the
+Microsoft login, and set `IMAGINE_AUTH_ISSUER` instead of a tenant:
+[docs/deploy/azure-wizard.md §6e](docs/deploy/azure-wizard.md).
+
 **Claude Code** can carry a bearer token directly:
 
 ```powershell

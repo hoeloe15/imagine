@@ -26,7 +26,23 @@ const settings: AuthSettings = {
   issuer: ISSUER,
   audiences: [AUDIENCE],
   requiredScopes: [DEFAULT_REQUIRED_SCOPE],
-  metadataUrl: METADATA_URL,
+  metadataUrls: [METADATA_URL],
+};
+
+// A non-Entra authorization server, shaped like a WorkOS AuthKit instance: the
+// issuer is a bare https origin, discovery hangs off it, and the token has no
+// tid and no oid (ADR 0023).
+const AUTHKIT_ISSUER = "https://imagine-test.authkit.app";
+const AUTHKIT_METADATA_URL = `${AUTHKIT_ISSUER}/.well-known/oauth-authorization-server`;
+const AUTHKIT_OIDC_METADATA_URL = `${AUTHKIT_ISSUER}/.well-known/openid-configuration`;
+const AUTHKIT_JWKS_URI = `${AUTHKIT_ISSUER}/oauth2/jwks`;
+
+const issuerSettings: AuthSettings = {
+  tenantId: null,
+  issuer: AUTHKIT_ISSUER,
+  audiences: [AUDIENCE],
+  requiredScopes: [],
+  metadataUrls: [AUTHKIT_METADATA_URL, AUTHKIT_OIDC_METADATA_URL],
 };
 
 interface TestKey {
@@ -88,10 +104,27 @@ function claims(overrides: Record<string, unknown> = {}): Record<string, unknown
 
 let published: TestKey[];
 let requests: string[];
+/** Which of the two well-known documents the fake issuer serves. */
+let authkitDiscoveryUrl: string;
 
 const fetchJwks: FetchLike = (url) => {
   requests.push(url);
 
+  if (url === authkitDiscoveryUrl) {
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({ issuer: AUTHKIT_ISSUER, jwks_uri: AUTHKIT_JWKS_URI }),
+    });
+  }
+  if (url === AUTHKIT_JWKS_URI) {
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ keys: published.map((key) => key.jwk) }),
+    });
+  }
   if (url === METADATA_URL) {
     return Promise.resolve({
       ok: true,
@@ -128,7 +161,32 @@ function refused(outcome: AuthOutcome): Extract<AuthOutcome, { ok: false }> {
 beforeEach(() => {
   published = [signingKey, rotatedKey];
   requests = [];
+  authkitDiscoveryUrl = AUTHKIT_METADATA_URL;
 });
+
+function issuerModeAuthenticator(overrides: Partial<AuthSettings> = {}): Authenticator {
+  return createAuthenticator(
+    { ...issuerSettings, ...overrides },
+    { fetch: fetchJwks, now: () => NOW_MS, minRefreshIntervalMs: 0 },
+  );
+}
+
+/** What an AuthKit access token for an MCP resource looks like. */
+function issuerClaims(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    iss: AUTHKIT_ISSUER,
+    aud: AUDIENCE,
+    sub: "user_01HBEQKA6K4QJAS93VPE39W1JT",
+    sid: "session_01HQSXZGF8FHF7A9ZZFCW4387R",
+    email: "mark@example.com",
+    name: "Mark Verheul",
+    iat: NOW_SECONDS - 60,
+    exp: NOW_SECONDS + 3600,
+    ...overrides,
+  };
+}
 
 describe("authSettingsFromEnv", () => {
   it("is off when nothing is configured", () => {
@@ -147,8 +205,18 @@ describe("authSettingsFromEnv", () => {
       issuer: ISSUER,
       audiences: [AUDIENCE],
       requiredScopes: [DEFAULT_REQUIRED_SCOPE],
-      metadataUrl: METADATA_URL,
+      metadataUrls: [METADATA_URL],
     });
+  });
+
+  it("keeps the tenant's discovery document when the issuer is overridden", () => {
+    expect(
+      authSettingsFromEnv({
+        IMAGINE_AUTH_TENANT_ID: TENANT,
+        IMAGINE_AUTH_ISSUER: `https://sts.windows.net/${TENANT}/`,
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+      })?.metadataUrls,
+    ).toEqual([METADATA_URL]);
   });
 
   it("takes an explicit issuer, several audiences and several permissions", () => {
@@ -173,6 +241,165 @@ describe("authSettingsFromEnv", () => {
     expect(() => authSettingsFromEnv({ IMAGINE_AUTH_TENANT_ID: TENANT })).toThrow(
       /IMAGINE_AUTH_AUDIENCE/,
     );
+    expect(() => authSettingsFromEnv({ IMAGINE_AUTH_ISSUER: AUTHKIT_ISSUER })).toThrow(
+      /IMAGINE_AUTH_AUDIENCE/,
+    );
+    expect(() =>
+      authSettingsFromEnv({ IMAGINE_AUTH_METADATA_URL: AUTHKIT_METADATA_URL }),
+    ).toThrow(/IMAGINE_AUTH_ISSUER/);
+  });
+});
+
+describe("authSettingsFromEnv in issuer mode", () => {
+  it("needs no tenant, and derives both well-known documents from the issuer", () => {
+    expect(
+      authSettingsFromEnv({
+        IMAGINE_AUTH_ISSUER: AUTHKIT_ISSUER,
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+      }),
+    ).toEqual({
+      tenantId: null,
+      issuer: AUTHKIT_ISSUER,
+      audiences: [AUDIENCE],
+      requiredScopes: [],
+      metadataUrls: [AUTHKIT_METADATA_URL, AUTHKIT_OIDC_METADATA_URL],
+    });
+  });
+
+  it("does not default the required scope, because the issuer may publish none", () => {
+    expect(
+      authSettingsFromEnv({
+        IMAGINE_AUTH_ISSUER: AUTHKIT_ISSUER,
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+      })?.requiredScopes,
+    ).toEqual([]);
+
+    expect(
+      authSettingsFromEnv({
+        IMAGINE_AUTH_ISSUER: AUTHKIT_ISSUER,
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+        IMAGINE_AUTH_REQUIRED_SCOPE: "images.write",
+      })?.requiredScopes,
+    ).toEqual(["images.write"]);
+  });
+
+  it("lets IMAGINE_AUTH_METADATA_URL replace the derivation outright", () => {
+    expect(
+      authSettingsFromEnv({
+        IMAGINE_AUTH_ISSUER: AUTHKIT_ISSUER,
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+        IMAGINE_AUTH_METADATA_URL: "https://elsewhere.example/config",
+      })?.metadataUrls,
+    ).toEqual(["https://elsewhere.example/config"]);
+  });
+
+  it("drops a trailing slash on the issuer before appending the well-known path", () => {
+    expect(
+      authSettingsFromEnv({
+        IMAGINE_AUTH_ISSUER: `${AUTHKIT_ISSUER}/`,
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+      })?.metadataUrls,
+    ).toEqual([AUTHKIT_METADATA_URL, AUTHKIT_OIDC_METADATA_URL]);
+  });
+
+  it("refuses an issuer that is not an absolute http(s) URL", () => {
+    expect(() =>
+      authSettingsFromEnv({
+        IMAGINE_AUTH_ISSUER: "imagine-test.authkit.app",
+        IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+      }),
+    ).toThrow(/absolute https URL/);
+  });
+});
+
+describe("a token from a non-Entra issuer", () => {
+  it("is accepted, and identifies its caller by issuer and subject", async () => {
+    const outcome = await issuerModeAuthenticator()(
+      `Bearer ${sign(signingKey, issuerClaims())}`,
+    );
+
+    if (!outcome.ok) throw new Error(outcome.message);
+    expect(outcome.caller).toMatchObject({
+      callerId: `${AUTHKIT_ISSUER}:user_01HBEQKA6K4QJAS93VPE39W1JT`,
+      subject: "user_01HBEQKA6K4QJAS93VPE39W1JT",
+      objectId: null,
+      tenantId: null,
+      email: "mark@example.com",
+      name: "Mark Verheul",
+      username: "mark@example.com",
+      scopes: [],
+      roles: [],
+      audience: AUDIENCE,
+      issuer: AUTHKIT_ISSUER,
+    });
+  });
+
+  it("falls back to the OpenID document when the RFC 8414 one is absent", async () => {
+    authkitDiscoveryUrl = AUTHKIT_OIDC_METADATA_URL;
+
+    const outcome = await issuerModeAuthenticator()(
+      `Bearer ${sign(signingKey, issuerClaims())}`,
+    );
+
+    expect(outcome.ok).toBe(true);
+    expect(requests.slice(0, 3)).toEqual([
+      AUTHKIT_METADATA_URL,
+      AUTHKIT_OIDC_METADATA_URL,
+      AUTHKIT_JWKS_URI,
+    ]);
+  });
+
+  it("skips the tenant check only because no tenant is configured", async () => {
+    const foreign = sign(
+      signingKey,
+      issuerClaims({ tid: "99999999-9999-9999-9999-999999999999" }),
+    );
+
+    expect((await issuerModeAuthenticator()(`Bearer ${foreign}`)).ok).toBe(true);
+
+    const guarded = refused(
+      await issuerModeAuthenticator({ tenantId: TENANT })(`Bearer ${foreign}`),
+    );
+    expect(guarded.status).toBe(401);
+    expect(guarded.message).toMatch(/tenant/);
+  });
+
+  it("still refuses another issuer, another audience and an expired token", async () => {
+    const cases = [
+      issuerClaims({ iss: "https://evil.example" }),
+      issuerClaims({ aud: "https://other.example/mcp" }),
+      issuerClaims({ exp: NOW_SECONDS - 3600 }),
+    ];
+
+    for (const payload of cases) {
+      const outcome = refused(
+        await issuerModeAuthenticator()(`Bearer ${sign(signingKey, payload)}`),
+      );
+      expect(outcome.status).toBe(401);
+    }
+  });
+
+  it("enforces a required scope in issuer mode too, once one is configured", async () => {
+    const authenticate = issuerModeAuthenticator({ requiredScopes: ["images.write"] });
+
+    const outcome = refused(
+      await authenticate(`Bearer ${sign(signingKey, issuerClaims())}`),
+    );
+    expect(outcome.status).toBe(403);
+
+    const granted = await authenticate(
+      `Bearer ${sign(signingKey, issuerClaims({ scope: "openid images.write" }))}`,
+    );
+    expect(granted.ok).toBe(true);
+  });
+
+  it("keeps the tenant-shaped caller id when a tenant is configured after all", async () => {
+    const outcome = await issuerModeAuthenticator({ tenantId: TENANT })(
+      `Bearer ${sign(signingKey, issuerClaims())}`,
+    );
+
+    if (!outcome.ok) throw new Error(outcome.message);
+    expect(outcome.caller.callerId).toBe(`${TENANT}:user_01HBEQKA6K4QJAS93VPE39W1JT`);
   });
 });
 
