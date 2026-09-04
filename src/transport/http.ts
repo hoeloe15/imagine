@@ -18,7 +18,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Env } from "../core/config.js";
 import { version } from "../version.js";
-import { bearerChallenge, type Authenticator, type CallerIdentity } from "./auth.js";
+import {
+  bearerChallenge,
+  type Authenticator,
+  type Authoriser,
+  type CallerIdentity,
+} from "./auth.js";
 import type { ProtectedResource } from "./protected-resource.js";
 
 export const MCP_PATH = "/mcp";
@@ -53,6 +58,13 @@ export interface HttpTransportOptions extends Partial<HttpSettings> {
    * the endpoint is open, which is the local mode.
    */
   authenticate?: Authenticator;
+  /**
+   * Decides whether the authenticated caller is welcome, after the token has
+   * been verified. Omitted means everyone the issuer accepts is welcome, which
+   * is what a deployment without an allowlist has always done. The portal calls
+   * the same seam with the identity it read from a session cookie.
+   */
+  authorise?: Authoriser;
   /**
    * The RFC 9728 document to serve, and the URL the 401 points at. Present
    * exactly when authentication is configured and a public URL for this server
@@ -239,6 +251,7 @@ async function route(
 
     const caller = await authenticated(req, res, options);
     if (caller === REFUSED) return;
+    if (!allowed(caller, res, options)) return;
 
     await handleMcpPost(req, res, () => options.createServer({ caller }));
   } catch (error) {
@@ -302,6 +315,28 @@ async function authenticated(
   );
   sendRpcError(res, outcome.status, -32600, outcome.message);
   return REFUSED;
+}
+
+/**
+ * Membership, checked after the token was verified. The refusal carries no
+ * `WWW-Authenticate` at all — not even a bare challenge — because the token is
+ * genuine and there is no credential the caller could go and fetch that would
+ * change the answer. This is ADR 0021's treatment of `insufficient_scope`
+ * carried one step further: that 403 keeps its challenge because a differently
+ * scoped token exists; this one has nothing honest to point at.
+ */
+function allowed(
+  caller: CallerIdentity | null,
+  res: ServerResponse,
+  options: HttpTransportOptions,
+): boolean {
+  if (caller === null || !options.authorise) return true;
+
+  const decision = options.authorise(caller);
+  if (decision.ok) return true;
+
+  sendRpcError(res, decision.status, -32600, decision.message);
+  return false;
 }
 
 /**

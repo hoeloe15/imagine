@@ -2,14 +2,18 @@ import { generateKeyPairSync, createSign, webcrypto } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_REQUIRED_SCOPE,
+  allowlistFromEnv,
   authSettingsFromEnv,
   bearerChallenge,
   canonicalAudience,
   createAuthenticator,
+  createAuthoriser,
   describeCaller,
+  parseAllowlist,
   type AuthOutcome,
   type AuthSettings,
   type Authenticator,
+  type CallerIdentity,
 } from "../../src/transport/auth.js";
 import type { FetchLike } from "../../src/transport/jwt.js";
 
@@ -688,6 +692,150 @@ describe("bearerChallenge", () => {
     );
 
     expect(challenge).toContain('\\",foo=\\"bar');
+  });
+});
+
+describe("the membership allowlist", () => {
+  const allowlistEnv = {
+    IMAGINE_AUTH_ISSUER: AUTHKIT_ISSUER,
+    IMAGINE_AUTH_AUDIENCE: AUDIENCE,
+  };
+
+  function caller(overrides: Partial<CallerIdentity> = {}): CallerIdentity {
+    return {
+      callerId: `${AUTHKIT_ISSUER}:user_01HBEQ`,
+      subject: "user_01HBEQ",
+      objectId: null,
+      tenantId: null,
+      username: "mark@example.com",
+      email: "mark@example.com",
+      name: "Mark Verheul",
+      clientId: null,
+      scopes: [],
+      roles: [],
+      issuer: AUTHKIT_ISSUER,
+      audience: AUDIENCE,
+      expiresAt: NOW_SECONDS + 3600,
+      claims: {},
+      ...overrides,
+    };
+  }
+
+  it("is absent unless the variable says otherwise", () => {
+    expect(allowlistFromEnv({}, issuerSettings)).toBeNull();
+    expect(
+      allowlistFromEnv({ IMAGINE_ALLOWED_SUBJECTS: "   " }, issuerSettings),
+    ).toBeNull();
+  });
+
+  it("refuses to be an allowlist with nobody to check it against", () => {
+    expect(() =>
+      allowlistFromEnv({ IMAGINE_ALLOWED_SUBJECTS: "user_01HBEQ" }, null),
+    ).toThrow(/authentication is off/);
+
+    expect(
+      allowlistFromEnv(
+        { ...allowlistEnv, IMAGINE_ALLOWED_SUBJECTS: "user_01HBEQ" },
+        issuerSettings,
+      )?.size,
+    ).toBe(1);
+  });
+
+  it("reads a comma separated list and counts its entries", () => {
+    const allowlist = parseAllowlist(" user_a , user_b,\temail:Mark@Example.com ");
+
+    expect(allowlist.size).toBe(3);
+    expect(allowlist.allows(caller({ subject: "user_b" }))).toBe(true);
+  });
+
+  it("matches the stable subject, and the caller id built from it", () => {
+    const allowlist = parseAllowlist("user_01HBEQ");
+
+    expect(allowlist.allows(caller())).toBe(true);
+    expect(allowlist.allows(caller({ subject: "someone-else" }))).toBe(false);
+    expect(parseAllowlist(`${AUTHKIT_ISSUER}:user_01HBEQ`).allows(caller())).toBe(true);
+  });
+
+  it("matches an email: entry without caring about case", () => {
+    const allowlist = parseAllowlist("email:MARK@example.COM");
+
+    expect(allowlist.allows(caller({ subject: "someone-else" }))).toBe(true);
+    expect(allowlist.allows(caller({ email: "Mark@Example.com" }))).toBe(true);
+    expect(allowlist.allows(caller({ email: "other@example.com" }))).toBe(false);
+    expect(allowlist.allows(caller({ email: null }))).toBe(false);
+  });
+
+  it("does not let a subject entry match an email claim, or the other way round", () => {
+    expect(parseAllowlist("mark@example.com").allows(caller({ subject: "x" }))).toBe(
+      false,
+    );
+    expect(parseAllowlist("email:user_01HBEQ").allows(caller())).toBe(false);
+  });
+
+  it("refuses a list that would lock everybody out or names no address", () => {
+    expect(() => parseAllowlist(",")).toThrow(/lists nobody/);
+    expect(() => parseAllowlist("email:")).toThrow(/no address/);
+  });
+});
+
+describe("the authoriser", () => {
+  const member: CallerIdentity = {
+    callerId: `${AUTHKIT_ISSUER}:user_allowed`,
+    subject: "user_allowed",
+    objectId: null,
+    tenantId: null,
+    username: null,
+    email: null,
+    name: null,
+    clientId: null,
+    scopes: [],
+    roles: [],
+    issuer: AUTHKIT_ISSUER,
+    audience: AUDIENCE,
+    expiresAt: NOW_SECONDS + 3600,
+    claims: {},
+  };
+  const stranger: CallerIdentity = {
+    ...member,
+    callerId: `${AUTHKIT_ISSUER}:user_stranger`,
+    subject: "user_stranger",
+  };
+
+  it("lets a listed caller through", () => {
+    const lines: string[] = [];
+    const authorise = createAuthoriser(parseAllowlist("user_allowed"), {
+      log: (line) => lines.push(line),
+    });
+
+    expect(authorise(member)).toEqual({ ok: true });
+    expect(lines).toEqual([]);
+  });
+
+  it("refuses anyone else with a 403 that explains itself", () => {
+    const authorise = createAuthoriser(parseAllowlist("user_allowed"), {
+      log: () => {},
+    });
+
+    const decision = authorise(stranger);
+
+    if (decision.ok) throw new Error("Expected the stranger to be refused.");
+    expect(decision.status).toBe(403);
+    expect(decision.message).toContain("user_stranger");
+    expect(decision.message).toMatch(/IMAGINE_ALLOWED_SUBJECTS/);
+    expect(decision.message).toMatch(/Signing in again/);
+  });
+
+  it("logs one line naming the caller, and how long the list is", () => {
+    const lines: string[] = [];
+    const authorise = createAuthoriser(parseAllowlist("user_allowed, user_other"), {
+      log: (line) => lines.push(line),
+    });
+
+    authorise(stranger);
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(describeCaller(stranger));
+    expect(lines[0]).toContain("2 entries");
   });
 });
 

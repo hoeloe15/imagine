@@ -14,8 +14,10 @@ import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import { StubProvider } from "../../src/providers/stub.js";
 import { startHttpServer, type RunningHttpServer } from "../../src/transport/http.js";
 import {
+  allowlistFromEnv,
   authSettingsFromEnv,
   createAuthenticator,
+  createAuthoriser,
   type AuthOutcome,
   type AuthSettings,
   type CallerIdentity,
@@ -465,15 +467,27 @@ describe("the same transport in front of a non-Entra OIDC issuer", () => {
     IMAGINE_MCP_RESOURCE_URI: resourceUrl,
   };
 
-  async function serveBehindIssuer(): Promise<RunningHttpServer> {
+  async function serveBehindIssuer(
+    allowedSubjects?: string,
+  ): Promise<RunningHttpServer> {
     const settings = authSettingsFromEnv(env);
     if (settings === null) throw new Error("Expected authentication to be configured.");
+
+    const allowlist = allowlistFromEnv(
+      allowedSubjects === undefined
+        ? env
+        : { ...env, IMAGINE_ALLOWED_SUBJECTS: allowedSubjects },
+      settings,
+    );
 
     const deps = dependencies();
     running = await startHttpServer({
       host: "127.0.0.1",
       port: 0,
       authenticate: createAuthenticator(settings, { fetch: issuerFetch }),
+      ...(allowlist
+        ? { authorise: createAuthoriser(allowlist, { log: () => {} }) }
+        : {}),
       protectedResource:
         protectedResourceFromEnv(env, settings, { mcpPath: "/mcp" }) ?? undefined,
       createServer: () => createServer(deps),
@@ -520,6 +534,57 @@ describe("the same transport in front of a non-Entra OIDC issuer", () => {
     await client.close();
 
     expect(tools.map((tool) => tool.name)).toContain("generate_image");
+  });
+
+  it("lets an allowlisted subject run a tool, exactly as before", async () => {
+    const server = await serveBehindIssuer("user_01HBEQKA6K4QJAS93VPE39W1JT");
+
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(server.endpoint), {
+        requestInit: { headers: { authorization: `Bearer ${token()}` } },
+      }),
+    );
+    const { tools } = await client.listTools();
+    await client.close();
+
+    expect(tools.map((tool) => tool.name)).toContain("generate_image");
+  });
+
+  it("refuses a valid token from another account with 403 and no pointer", async () => {
+    const server = await serveBehindIssuer("user_SOMEONE_ELSE");
+
+    const response = await fetch(server.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token()}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("www-authenticate")).toBeNull();
+    const body = (await response.json()) as { error: { message: string } };
+    expect(body.error.message).toMatch(/IMAGINE_ALLOWED_SUBJECTS/);
+    expect(body.error.message).toContain("user_01HBEQKA6K4QJAS93VPE39W1JT");
+  });
+
+  it("accepts the same caller by verified email instead of subject", async () => {
+    const server = await serveBehindIssuer("email:MARK@Example.com");
+
+    const response = await fetch(server.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token()}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+
+    expect(response.status).toBe(200);
   });
 
   it("still refuses a token minted for another resource", async () => {
@@ -627,7 +692,69 @@ describe("the built binary with --http", () => {
       'Bearer resource_metadata="https://imagine.example/.well-known/oauth-protected-resource/mcp", scope="access_as_user"',
     );
   });
+
+  it("reports the allowlist in the banner without naming anyone", async () => {
+    const spawned = spawn(process.execPath, [binary, "--http"], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        HOME: directory,
+        USERPROFILE: directory,
+        IMAGINE_HTTP_PORT: "0",
+        IMAGINE_HTTP_HOST: "127.0.0.1",
+        IMAGINE_AUTH_ISSUER: "https://imagine-test.authkit.app",
+        IMAGINE_AUTH_AUDIENCE: "https://imagine.example/mcp",
+        IMAGINE_ALLOWED_SUBJECTS: "user_01HBEQ, email:mark@example.com",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child = spawned;
+
+    const banner = await readUntil(spawned, /endpoint:\s+(\S+)/);
+
+    expect(banner).toMatch(/allowlist:\s+on, 2 entries/);
+    expect(banner).not.toContain("user_01HBEQ");
+    expect(banner).not.toContain("mark@example.com");
+  });
+
+  it("refuses to start with an allowlist and no authentication", async () => {
+    const spawned = spawn(process.execPath, [binary, "--http"], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        HOME: directory,
+        USERPROFILE: directory,
+        IMAGINE_HTTP_PORT: "0",
+        IMAGINE_HTTP_HOST: "127.0.0.1",
+        IMAGINE_ALLOWED_SUBJECTS: "user_01HBEQ",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child = spawned;
+
+    const { code, stderr } = await exited(spawned);
+
+    expect(code).not.toBe(0);
+    expect(stderr).toMatch(/IMAGINE_ALLOWED_SUBJECTS/);
+    expect(stderr).toMatch(/authentication is off/);
+  });
 });
+
+function exited(child: ChildProcess): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    const timer = setTimeout(
+      () => reject(new Error(`Never exited. Saw: ${stderr}`)),
+      15_000,
+    );
+
+    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stderr });
+    });
+  });
+}
 
 function readUntil(child: ChildProcess, pattern: RegExp): Promise<string> {
   return new Promise((resolve, reject) => {

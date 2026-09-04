@@ -2,8 +2,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { buildDependencies, createImagineServer } from "./composition.js";
 import { createServer } from "./mcp/server.js";
 import {
+  allowlistFromEnv,
   authSettingsFromEnv,
   createAuthenticator,
+  createAuthoriser,
+  type Allowlist,
   type AuthSettings,
 } from "./transport/auth.js";
 import {
@@ -29,17 +32,21 @@ if (httpRequested(process.argv.slice(2), process.env)) {
 async function serveHttp(): Promise<void> {
   const settings = httpSettingsFromEnv(process.env);
   const auth = authSettingsFromEnv(process.env);
+  const allowlist = allowlistFromEnv(process.env, auth);
   const resource = protectedResourceFromEnv(process.env, auth, { mcpPath: MCP_PATH });
   const dependencies = await buildDependencies();
 
   const running = await startHttpServer({
     ...settings,
     ...(auth ? { authenticate: createAuthenticator(auth) } : {}),
+    ...(allowlist ? { authorise: createAuthoriser(allowlist) } : {}),
     ...(resource ? { protectedResource: resource } : {}),
     createServer: () => createServer(dependencies),
   });
 
-  process.stderr.write(banner(running, settings.allowedOrigins, auth, resource));
+  process.stderr.write(
+    banner(running, settings.allowedOrigins, auth, allowlist, resource),
+  );
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
@@ -52,6 +59,7 @@ function banner(
   running: RunningHttpServer,
   allowedOrigins: readonly string[],
   auth: AuthSettings | null,
+  allowlist: Allowlist | null,
   resource: ProtectedResource | null,
 ): string {
   const origins =
@@ -74,7 +82,7 @@ function banner(
     "",
     ...(auth === null
       ? unauthenticatedNotice()
-      : [...authenticatedNotice(auth), ...discoveryNotice(resource)]),
+      : [...authenticatedNotice(auth, allowlist), ...discoveryNotice(resource)]),
     exposure,
     "",
   ].join("\n");
@@ -90,7 +98,10 @@ function unauthenticatedNotice(): string[] {
   ];
 }
 
-function authenticatedNotice(auth: AuthSettings): string[] {
+function authenticatedNotice(
+  auth: AuthSettings,
+  allowlist: Allowlist | null,
+): string[] {
   return [
     auth.tenantId === null
       ? "  AUTHENTICATED: every POST to /mcp needs a bearer token from the issuer below."
@@ -104,6 +115,9 @@ function authenticatedNotice(auth: AuthSettings): string[] {
     auth.requiredScopes.length === 0
       ? "  required scope:  none — any token this issuer minted for this resource is accepted"
       : `  required scope:  ${auth.requiredScopes.join(" or ")}`,
+    allowlist === null
+      ? "  allowlist:       none — every account this issuer signs in may call /mcp"
+      : `  allowlist:       on, ${allowlist.size} ${allowlist.size === 1 ? "entry" : "entries"} — anyone else is refused with 403`,
     "  /healthz stays open, so probes and load balancers keep working.",
   ];
 }

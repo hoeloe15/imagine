@@ -133,7 +133,8 @@ What changes when the tenant is unset:
 
 One consequence to decide deliberately rather than discover: with Microsoft as
 a social provider, *any* Microsoft account can log in unless you restrict
-membership inside AuthKit. The `tid` check is no longer doing that job for you.
+membership. The `tid` check is no longer doing that job for you. Restrict it in
+AuthKit **and** with `IMAGINE_ALLOWED_SUBJECTS` — see the next section.
 
 The dashboard checklist, the `azd` commands and the verification steps are in
 [docs/deploy/azure-wizard.md §6e](deploy/azure-wizard.md); the reasoning, and
@@ -144,6 +145,56 @@ One caveat worth knowing before you share the URL with a colleague:
 `budget.max_usd_per_session` is enforced per process, so over HTTP it becomes a
 single bucket shared by everyone talking to that server rather than a per-person
 cap. `max_usd_per_day` behaves the same way.
+
+## Restricting who may use it
+
+Authentication answers "is this a real account?". It does not answer "is this
+*your* account". With WorkOS AuthKit and Microsoft as a social provider those
+are very different questions: any Microsoft account in the world can complete
+that login, and the `tid` check that used to keep strangers out is not there any
+more. So there is a second gate, in the server, and it is one variable:
+
+```sh
+IMAGINE_ALLOWED_SUBJECTS=user_01HBEQKA6K4QJAS93VPE39W1JT
+```
+
+Only the accounts you list may call `/mcp`. Everyone else gets a `403` that says
+so. Leave it unset and nothing changes: every account your issuer signs in is
+welcome, which is what every deployment did before this existed.
+
+| `IMAGINE_ALLOWED_SUBJECTS` | What happens |
+| --- | --- |
+| unset or blank | No allowlist. Any account the issuer authenticates may call `/mcp` |
+| `sub-a, sub-b` | Only those two subjects. A verified token from anyone else is a `403` |
+| `email:you@example.com` | Matched against the token's verified `email` claim, ignoring case |
+| set while authentication is off | The server refuses to start |
+
+Some detail worth knowing:
+
+- **Entries are matched against the token's `sub`** — the stable identifier the
+  issuer minted, which is also what the caller id in the logs is built from.
+  Either spelling works: the bare subject, or the whole caller id.
+- **`email:` is a convenience**, because a WorkOS user id is a string nobody can
+  recognise and your own address is one you already know. It is only as
+  trustworthy as your issuer's email verification; WorkOS verifies the address
+  for social logins, which is why it is offered at all. If you would rather not
+  depend on that, list subjects.
+- **An allowlist without authentication is a startup error**, not a warning.
+  There would be no verified identity to compare it against, so it would be a
+  security setting that silently does nothing.
+- **The startup banner says whether it is on and how many entries it has**, and
+  never who is on it. A refusal writes one line naming the rejected caller — the
+  identifier, never the token.
+- **The `403` carries no `WWW-Authenticate` pointer.** The token was valid;
+  logging in again with the same account cannot help, and sending the client off
+  to start OAuth would just cost it a round trip and a consent screen.
+
+Do this *as well as* restricting membership in your issuer's own dashboard, not
+instead of it. A server that is only safe because somebody remembered to flick a
+toggle in someone else's web app is not safe — the same argument
+[ADR 0021](adr/0021-protected-resource-metadata-and-no-platform-auth.md) used
+for validating tokens in-app. The reasoning is in
+[ADR 0025](adr/0025-membership-allowlist.md).
 
 ## Telling Claude where to log in
 

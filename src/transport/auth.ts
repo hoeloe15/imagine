@@ -85,6 +85,33 @@ export interface CallerIdentity {
   claims: JwtClaims;
 }
 
+/**
+ * Who may use this server, once the token has proved who they are. Two
+ * different questions: {@link Authenticator} asks whether the credential is
+ * genuine, {@link Authoriser} asks whether this particular person is welcome.
+ * The portal will ask the second question about a session cookie, with no
+ * bearer token anywhere in sight, which is why it is a seam and not an `if`
+ * inside the token path.
+ */
+export interface Allowlist {
+  /** For the startup banner. The entries themselves are never reported. */
+  readonly size: number;
+  allows(caller: CallerIdentity): boolean;
+}
+
+export type AuthorisationOutcome =
+  { ok: true } | { ok: false; status: 403; message: string };
+
+export type Authoriser = (caller: CallerIdentity) => AuthorisationOutcome;
+
+export interface AuthoriserOptions {
+  /** One line per refusal. Defaults to stderr, where the banner also goes. */
+  log?: (message: string) => void;
+}
+
+export const ALLOWED_SUBJECTS_ENV = "IMAGINE_ALLOWED_SUBJECTS";
+const EMAIL_ENTRY_PREFIX = "email:";
+
 export type BearerError = "invalid_request" | "invalid_token" | "insufficient_scope";
 
 export type AuthOutcome =
@@ -180,6 +207,94 @@ function issuerOrigin(issuer: string): string {
     );
   }
   return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/**
+ * Reads the membership allowlist, or `null` for "everyone this issuer accepts",
+ * which is what every deployment before this one did.
+ *
+ * An allowlist without authentication is refused at startup: there is no
+ * verified identity to compare it against, so it would be a security setting
+ * that silently does nothing — the failure mode ADR 0021 exists to avoid.
+ */
+export function allowlistFromEnv(
+  env: Env,
+  auth: AuthSettings | null,
+): Allowlist | null {
+  const raw = trimmed(env[ALLOWED_SUBJECTS_ENV]);
+  if (raw === "") return null;
+
+  if (auth === null) {
+    throw new Error(
+      `${ALLOWED_SUBJECTS_ENV} is set, but authentication is off, so there is no verified identity to check it against. Set the IMAGINE_AUTH_* variables as well, or unset ${ALLOWED_SUBJECTS_ENV}.`,
+    );
+  }
+
+  return parseAllowlist(raw);
+}
+
+/**
+ * Entries are matched against the stable subject the issuer minted — `sub`,
+ * which is also what `callerId` is built from. An `email:<address>` entry is
+ * matched case-insensitively against the verified `email` claim instead,
+ * because a WorkOS user id is a string nobody can recognise and an address is
+ * one the owner already knows. That convenience is only as good as the issuer's
+ * email verification; AuthKit verifies it for social logins.
+ */
+export function parseAllowlist(raw: string): Allowlist {
+  const subjects = new Set<string>();
+  const emails = new Set<string>();
+
+  for (const entry of splitList(raw)) {
+    if (!entry.toLowerCase().startsWith(EMAIL_ENTRY_PREFIX)) {
+      subjects.add(entry);
+      continue;
+    }
+
+    const address = entry.slice(EMAIL_ENTRY_PREFIX.length).trim().toLowerCase();
+    if (address === "") {
+      throw new Error(
+        `${ALLOWED_SUBJECTS_ENV} has an entry of "${entry}" with no address after it. Write it as email:someone@example.com.`,
+      );
+    }
+    emails.add(address);
+  }
+
+  if (subjects.size === 0 && emails.size === 0) {
+    throw new Error(
+      `${ALLOWED_SUBJECTS_ENV} is set but lists nobody, which would refuse every caller. Unset it to let every account this issuer accepts through.`,
+    );
+  }
+
+  return Object.freeze({
+    size: subjects.size + emails.size,
+    allows: (caller: CallerIdentity): boolean =>
+      subjects.has(caller.subject) ||
+      subjects.has(caller.callerId) ||
+      (caller.email !== null && emails.has(caller.email.toLowerCase())),
+  });
+}
+
+export function createAuthoriser(
+  allowlist: Allowlist,
+  options: AuthoriserOptions = {},
+): Authoriser {
+  const log =
+    options.log ?? ((message: string) => void process.stderr.write(`${message}\n`));
+
+  return (caller) => {
+    if (allowlist.allows(caller)) return { ok: true };
+
+    log(
+      `imagine: refused ${describeCaller(caller)} — not on ${ALLOWED_SUBJECTS_ENV} (${allowlist.size} ${allowlist.size === 1 ? "entry" : "entries"}).`,
+    );
+
+    return {
+      ok: false,
+      status: 403,
+      message: `This account is not allowed to use this server. Its owner limits access with ${ALLOWED_SUBJECTS_ENV}; ask them to add ${caller.subject} to it. Signing in again with the same account will not change this.`,
+    };
+  };
 }
 
 export function createAuthenticator(
