@@ -13,6 +13,7 @@ import {
 import { ImagineError } from "../../src/core/errors.js";
 import { parseModelKnowledge, type ModelKnowledge } from "../../src/core/knowledge.js";
 import { createSecretResolver } from "../../src/core/secrets.js";
+import { createVerificationStore } from "../../src/core/verification.js";
 import type { NormalisedResult, ProviderModel } from "../../src/core/types.js";
 import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import {
@@ -196,6 +197,51 @@ function byId(payload: ListCapabilitiesSuccess, id: string): ProviderCapability 
   if (found === undefined) throw new Error(`no provider ${id} in the response`);
   return found;
 }
+
+describe("what was last verified", () => {
+  it("is null for every provider until somebody checks one", async () => {
+    const { payload } = await capabilities();
+    for (const provider of payload.configured_providers) {
+      expect(provider.last_verified).toBeNull();
+    }
+  });
+
+  it("reports the outcome the portal recorded, and only its safe half", async () => {
+    const verifications = createVerificationStore({ costLog: null });
+    await verifications.record("ready", {
+      at: "2026-09-04T10:00:00.000Z",
+      ok: true,
+      summary: "31 image models visible",
+      reason: null,
+    });
+
+    const { payload, raw } = await capabilities({ verifications });
+
+    expect(byId(payload, "ready").last_verified).toEqual({
+      at: "2026-09-04T10:00:00.000Z",
+      ok: true,
+      summary: "31 image models visible",
+    });
+    expect(byId(payload, "missing").last_verified).toBeNull();
+    expect(raw).not.toContain(SECRET);
+  });
+
+  it("reports a rejection as one, so a client can say the key does not work", async () => {
+    const verifications = createVerificationStore({ costLog: null });
+    await verifications.record("ready", {
+      at: "2026-09-04T10:00:00.000Z",
+      ok: false,
+      summary: "invalid key (401)",
+      reason: "auth_failed",
+    });
+
+    const { payload } = await capabilities({ verifications });
+    expect(byId(payload, "ready").last_verified).toMatchObject({
+      ok: false,
+      summary: "invalid key (401)",
+    });
+  });
+});
 
 describe("list_capabilities", () => {
   it("is registered as a read-only tool taking no arguments", async () => {

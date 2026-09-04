@@ -28,6 +28,7 @@ import {
   type SecretSourceKind,
 } from "../../core/secrets.js";
 import { USE_CASES } from "../../core/types.js";
+import type { LastVerification, VerificationStore } from "../../core/verification.js";
 import type { ImageProvider } from "../../providers/types.js";
 
 export const LIST_CAPABILITIES_TOOL_NAME = "list_capabilities";
@@ -52,6 +53,19 @@ export interface ListCapabilitiesDependencies {
    * to an environment-only resolver, which is what it always did (ADR 0026).
    */
   secrets?: SecretResolver;
+  /**
+   * Where the portal recorded the last "does this credential work" check, so a
+   * chat client can say "stored and verified three minutes ago" rather than
+   * "stored". Absent means nothing has ever been verified in this installation.
+   */
+  verifications?: VerificationStore;
+}
+
+/** The last verification of one provider, as `list_capabilities` reports it. */
+export interface LastVerifiedSummary {
+  at: string;
+  ok: boolean;
+  summary: string;
 }
 
 /** `ready` means a request would reach this provider, not that it will succeed. */
@@ -76,6 +90,12 @@ export interface ProviderCapability {
    * values.
    */
   missing?: string[];
+  /**
+   * The last time someone checked that this provider's credential works, and
+   * what came back. `null` when nobody ever has. Never a key: the summary is
+   * derived from a status code, not from the provider's answer.
+   */
+  last_verified: LastVerifiedSummary | null;
   /** Why the provider is not usable, when the status alone does not say it. */
   note?: string;
   /** Present only for `error`: what went wrong reaching the provider. */
@@ -118,6 +138,9 @@ const providerCapabilitySchema = z.object({
   models: z.array(z.string()),
   models_source: z.enum(["live", "curated"]),
   key_source: z.enum(["vault", "env"]).nullable().optional(),
+  last_verified: z
+    .object({ at: z.string(), ok: z.boolean(), summary: z.string() })
+    .nullable(),
   missing: z.array(z.string()).optional(),
   note: z.string().optional(),
   error: z.string().optional(),
@@ -137,7 +160,7 @@ export const listCapabilitiesOutputSchema = {
   configured_providers: z
     .array(providerCapabilitySchema)
     .describe(
-      "Every provider this installation knows about, ready or not, with where a ready one's key came from and the environment variables or vault secrets a not_configured one is waiting for.",
+      "Every provider this installation knows about, ready or not, with where a ready one's key came from, the environment variables or vault secrets a not_configured one is waiting for, and when its credential was last verified to work.",
     ),
   default_model: z
     .string()
@@ -278,6 +301,9 @@ async function describeProvider(
   const adapter = deps.providers.find((provider) => provider.id === id);
   const credential = await credentials(id, deps.config.providers[id], secrets);
   const keySource = { key_source: credential.keySource };
+  const verified = {
+    last_verified: lastVerified(await deps.verifications?.get(id)),
+  };
 
   if (!credential.ready) {
     return {
@@ -286,6 +312,7 @@ async function describeProvider(
       models: curated,
       models_source: "curated",
       ...keySource,
+      ...verified,
       ...(credential.missing.length === 0 ? {} : { missing: credential.missing }),
       ...(credential.note === undefined ? {} : { note: credential.note }),
     };
@@ -298,6 +325,7 @@ async function describeProvider(
       models: curated,
       models_source: "curated",
       ...keySource,
+      ...verified,
       note: "No adapter for this provider is registered in this build, so nothing can be routed to it yet.",
     };
   }
@@ -309,6 +337,7 @@ async function describeProvider(
       models: curated,
       models_source: "curated",
       ...keySource,
+      ...verified,
       note: "The adapter reports itself unconfigured.",
     };
   }
@@ -321,6 +350,7 @@ async function describeProvider(
       models: curated,
       models_source: "curated",
       ...keySource,
+      ...verified,
       error: live.error,
     };
   }
@@ -331,7 +361,15 @@ async function describeProvider(
     models: merge(curated, live.models),
     models_source: "live",
     ...keySource,
+    ...verified,
   };
+}
+
+function lastVerified(
+  entry: LastVerification | null | undefined,
+): LastVerifiedSummary | null {
+  if (entry === null || entry === undefined) return null;
+  return { at: entry.at, ok: entry.ok, summary: entry.summary };
 }
 
 /**
@@ -435,7 +473,8 @@ export function registerListCapabilities(
       description:
         "Report what is available right now: which providers are ready and which are waiting " +
         "for an environment variable, which models are reachable through them, what has been " +
-        "spent against the budget, and how recently the curated model data was updated. " +
+        "spent against the budget, when each provider's credential was last verified to " +
+        "work, and how recently the curated model data was updated. " +
         "Read-only, costs nothing, and never returns a key.",
       inputSchema: {},
       outputSchema: listCapabilitiesOutputSchema,

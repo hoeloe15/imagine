@@ -1,8 +1,23 @@
+import type { FailureReason } from "../core/errors.js";
 import type {
   NormalisedRequest,
   NormalisedResult,
   ProviderModel,
 } from "../core/types.js";
+
+/**
+ * What one free, side-effect-free check of a provider's credential found.
+ *
+ * `summary` is rendered on a page and written to disk, so it is derived from a
+ * status code and a {@link FailureReason} — never from the provider's response
+ * body, and never from the credential.
+ */
+export interface VerificationResult {
+  ok: boolean;
+  summary: string;
+  /** Set when `ok` is false. */
+  reason?: FailureReason;
+}
 
 /**
  * The model `core/router.ts` chose, in the adapter's own namespace. It arrives
@@ -30,6 +45,12 @@ export interface ImageProvider {
   isConfigured(): boolean;
   /** Models this provider reports it can reach right now. */
   listModels(): Promise<ProviderModel[]>;
+  /**
+   * Whether the configured credential actually works, without generating
+   * anything. Optional: `core/verification.ts` falls back to `listModels()`,
+   * which is the same free call for every adapter that has one.
+   */
+  verify?(): Promise<VerificationResult>;
   generate(
     request: NormalisedRequest,
     resolved?: ResolvedModel,

@@ -32,8 +32,9 @@ import type {
   NormalisedResult,
   ProviderModel,
 } from "../core/types.js";
+import { countOf, failureFrom } from "../core/verification.js";
 import { imageDimensions } from "./openrouter.js";
-import type { ImageProvider, ResolvedModel } from "./types.js";
+import type { ImageProvider, ResolvedModel, VerificationResult } from "./types.js";
 
 export const AZURE_ID = "azure";
 export const AZURE_DEFAULT_API_VERSION = "2025-04-01-preview";
@@ -55,7 +56,15 @@ export const AZURE_MAI_PATH = "/mai/v1/images/generations";
 export const MAI_MIN_SIDE = 768;
 export const MAI_MAX_AREA = 1_048_576;
 
+/**
+ * The data-plane model listing on the Azure OpenAI host. It is free, it changes
+ * nothing, and it is refused with the same 401/403 a generation would get — so
+ * it is the closest thing this resource offers to "try the credential".
+ */
+export const AZURE_MODELS_PATH = "/openai/models";
+
 const DEFAULT_GENERATE_TIMEOUT_MS = 120_000;
+const DEFAULT_VERIFY_TIMEOUT_MS = 15_000;
 
 export type FetchLike = typeof globalThis.fetch;
 export type AzureAuthMode = "api_key" | "entra";
@@ -107,6 +116,7 @@ export interface AzureProviderOptions {
   getAccessToken?: AccessTokenProvider;
   fetch?: FetchLike;
   generateTimeoutMs?: number;
+  verifyTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -149,6 +159,7 @@ export class AzureProvider implements ImageProvider {
   readonly #getAccessToken: AccessTokenProvider | undefined;
   readonly #fetch: FetchLike;
   readonly #generateTimeoutMs: number;
+  readonly #verifyTimeoutMs: number;
   readonly #now: () => number;
 
   constructor(options: AzureProviderOptions = {}) {
@@ -169,6 +180,7 @@ export class AzureProvider implements ImageProvider {
     this.#getAccessToken = options.getAccessToken;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#generateTimeoutMs = options.generateTimeoutMs ?? DEFAULT_GENERATE_TIMEOUT_MS;
+    this.#verifyTimeoutMs = options.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
     this.#now = options.now ?? Date.now;
   }
 
@@ -200,6 +212,115 @@ export class AzureProvider implements ImageProvider {
         },
       })),
     );
+  }
+
+  /**
+   * What can honestly be checked without generating anything.
+   *
+   * Azure publishes no listing of *image deployments*, so a green result here
+   * is not proof that a given deployment will answer. What it does prove
+   * depends on the mode, and the summary says which:
+   *
+   * - `api_key`: the resource accepted the key on a data-plane read. A 401 or
+   *   403 is a real rejection; anything else means the check found nothing out.
+   * - `entra`: the managed identity obtained a token for the scope a
+   *   generation would use, and — where the resource offers the listing — that
+   *   token was accepted by the resource. Where it does not, the summary says
+   *   plainly that this proves the identity and not the deployment.
+   */
+  async verify(): Promise<VerificationResult> {
+    try {
+      return await this.#verify();
+    } catch (cause) {
+      return failureFrom(cause);
+    }
+  }
+
+  async #verify(): Promise<VerificationResult> {
+    if (!this.#enabled) {
+      return {
+        ok: false,
+        reason: "invalid_request",
+        summary: `disabled in providers.${AZURE_ID}.enabled`,
+      };
+    }
+
+    const endpoint = this.#endpoint;
+    if (endpoint === null || endpoint.length === 0) {
+      return {
+        ok: false,
+        reason: "invalid_request",
+        summary: `no providers.${AZURE_ID}.endpoint is configured`,
+      };
+    }
+
+    const configured = countOf(Object.keys(this.#deployments).length, "deployment");
+    const scope = entraScopeFor(this.#dialectToVerify());
+    const headers = { ...(await this.#authHeader(scope)), Accept: "application/json" };
+
+    // A token minted for the MAI audience is not one this host accepts, so
+    // asking it would report a 401 that means the wrong thing.
+    if (this.#auth === "entra" && scope === AZURE_MAI_ENTRA_SCOPE) {
+      return {
+        ok: true,
+        summary: `the identity has a token for ${scope}; that proves the identity, not the deployment (${configured} configured)`,
+      };
+    }
+
+    const url = `${endpoint}${AZURE_MODELS_PATH}?api-version=${encodeURIComponent(this.#apiVersion)}`;
+    let response: Response;
+    try {
+      response = await this.#fetch(url, {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(this.#verifyTimeoutMs),
+      });
+    } catch (cause) {
+      throw transportError(cause);
+    }
+
+    const raw = await readBodyText(response);
+    const parsed = parseJson(raw);
+
+    if (response.ok) {
+      const data = parsed?.["data"];
+      const models = Array.isArray(data) ? data.length : 0;
+      return {
+        ok: true,
+        summary: `the resource accepted the credential — ${countOf(models, "model")} on it, ${configured} configured`,
+      };
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      throw httpError(response.status, parsed, raw, "");
+    }
+
+    if (this.#auth === "entra") {
+      return {
+        ok: true,
+        summary: `the identity has a token for ${scope}, but the resource offers no model listing (${response.status}), so this proves the identity, not the deployment`,
+      };
+    }
+
+    return {
+      ok: false,
+      reason: "unknown",
+      summary: `nothing could be proven: the resource answered ${response.status} to a model listing, which neither accepts nor refuses the key`,
+    };
+  }
+
+  /**
+   * Which wire dialect's audience to check. An `openai` deployment is checkable
+   * against the resource itself; a resource that only serves MAI is not, so its
+   * own audience is the one worth proving a token for.
+   */
+  #dialectToVerify(): AzureWireDialect {
+    const dialects = Object.values(this.#deployments).map(
+      (deployment) => deployment.dialect,
+    );
+    return dialects.length > 0 && dialects.every((dialect) => dialect === "mai")
+      ? "mai"
+      : "openai";
   }
 
   async generate(
@@ -597,7 +718,7 @@ function httpError(
   return new ImagineError(
     reason,
     `Azure OpenAI request failed with status ${status}: ${message}${hint}`,
-    { retryable },
+    { retryable, status },
   );
 }
 

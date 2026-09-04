@@ -35,6 +35,12 @@ import {
   type WritableSecretStore,
 } from "../core/secrets.js";
 import { USE_CASES, type UseCase } from "../core/types.js";
+import {
+  createVerificationStore,
+  verifyProvider,
+  type VerificationStore,
+} from "../core/verification.js";
+import type { ImageProvider } from "../providers/types.js";
 import type { AuthSettings, Authenticator, Authoriser } from "../transport/auth.js";
 import {
   auditRecord,
@@ -57,6 +63,7 @@ import {
   dashboardPage,
   loginPage,
   messagePage,
+  relativeTime,
   STYLESHEET,
   type ModelReach,
   type ModelRow,
@@ -86,6 +93,7 @@ import {
   PORTAL_LOGOUT_PATH,
   PORTAL_PATH,
   PORTAL_STYLE_PATH,
+  PORTAL_VERIFY_PREFIX,
   type PortalSettings,
 } from "./settings.js";
 
@@ -112,6 +120,13 @@ export interface PortalOptions {
   authenticate?: Authenticator;
   /** The same membership check `/mcp` applies, applied to portal logins too. */
   authorise?: Authoriser;
+  /**
+   * The registered adapters, so the page can ask one whether its credential
+   * actually works. Without them there is nothing to test and no button.
+   */
+  providers?: readonly ImageProvider[];
+  /** Where the last verification per provider is remembered between visits. */
+  verifications?: VerificationStore;
   audit?: AuditLog;
   fetch?: FetchLike;
   now?: () => Date;
@@ -138,9 +153,40 @@ export function createPortal(options: PortalOptions): PathHandler {
   const clock = options.now ?? (() => new Date());
   const seconds = (): number => Math.floor(clock().getTime() / 1000);
   const knowledge = options.knowledge ?? loadBundledModelKnowledge();
+  const verifications =
+    options.verifications ??
+    createVerificationStore({ costLog: config.logging.cost_log });
 
   function providerIds(): string[] {
     return Object.keys(config.providers);
+  }
+
+  function adapterFor(id: string): ImageProvider | undefined {
+    return options.providers?.find((provider) => provider.id === id);
+  }
+
+  /**
+   * A credential can only be tested where there is an adapter to test it with.
+   * Which word is on the button follows the credential, not the provider: a key
+   * is tested, an identity's access is.
+   */
+  function testLabel(id: string, entra: boolean): string | null {
+    if (adapterFor(id) === undefined) return null;
+    return entra ? "Test access" : "Test key";
+  }
+
+  async function verificationView(id: string): Promise<ProviderView["verification"]> {
+    const last = await verifications.get(id);
+    if (last === null) return null;
+    const at = new Date(last.at);
+    return {
+      ok: last.ok,
+      summary: last.summary,
+      relative: Number.isNaN(at.getTime())
+        ? "at an unknown time"
+        : relativeTime(at, clock()),
+      reason: last.reason,
+    };
   }
 
   async function providerViews(): Promise<ProviderView[]> {
@@ -221,6 +267,7 @@ export function createPortal(options: PortalOptions): PathHandler {
     const provider = config.providers[id];
     const secretName = provider === undefined ? null : secretNameFor(provider);
     const envVar = provider?.api_key_env ?? null;
+    const verification = await verificationView(id);
 
     if (provider === undefined || !provider.enabled) {
       return {
@@ -232,6 +279,8 @@ export function createPortal(options: PortalOptions): PathHandler {
         writable: false,
         note: "Disabled in configuration. Enable it there before a key here would do anything.",
         models: modelRows(id, "needs_enabling"),
+        testLabel: null,
+        verification,
       };
     }
 
@@ -245,6 +294,8 @@ export function createPortal(options: PortalOptions): PathHandler {
         writable: false,
         note: "Authenticates with the deployment's own managed identity, so there is no key to set.",
         models: modelRows(id, "ready"),
+        testLabel: testLabel(id, true),
+        verification,
       };
     }
 
@@ -262,6 +313,8 @@ export function createPortal(options: PortalOptions): PathHandler {
       writable,
       note: lookup.note ?? null,
       models: modelRows(id, status === "ready" ? "ready" : "needs_key"),
+      testLabel: status === "ready" ? testLabel(id, false) : null,
+      verification,
     };
   }
 
@@ -515,6 +568,8 @@ export function createPortal(options: PortalOptions): PathHandler {
       else await vault.set(view.secretName, (body.get("value") ?? "").trim());
 
       secrets.invalidate(providerId);
+      // The stamp on the card was about the key that has just been replaced.
+      await verifications.forget(providerId);
       await audit.write(
         auditRecord(
           {
@@ -548,6 +603,57 @@ export function createPortal(options: PortalOptions): PathHandler {
       );
       redirect(res, `${PORTAL_PATH}?failed=${encodeURIComponent(providerId)}`, req);
     }
+  }
+
+  /**
+   * One free, side-effect-free call to the provider, behind exactly the checks
+   * the key form is behind. It generates nothing, so it costs nothing, and the
+   * only thing it writes is the outcome — never the credential it used.
+   */
+  async function handleVerify(
+    req: IncomingMessage,
+    res: ServerResponse,
+    providerId: string,
+  ): Promise<void> {
+    const current = session(req);
+    const body = await readForm(req, res);
+    if (body === null) return;
+    if (!checked(req, res, current, body)) return;
+    if (current === null) return;
+
+    const view = await providerView(providerId);
+    const adapter = adapterFor(providerId);
+    if (
+      !providerIds().includes(providerId) ||
+      view.testLabel === null ||
+      adapter === undefined
+    ) {
+      redirect(res, `${PORTAL_PATH}?failed=${encodeURIComponent(providerId)}`, req);
+      return;
+    }
+
+    const result = await verifyProvider(adapter);
+    await verifications.record(providerId, {
+      at: clock().toISOString(),
+      ok: result.ok,
+      summary: result.summary,
+      reason: result.reason ?? null,
+    });
+
+    await audit.write(
+      auditRecord(
+        {
+          caller_id: current.callerId,
+          action: "provider.verify",
+          target: providerId,
+          outcome: result.ok ? "ok" : "failed",
+          detail: result.summary,
+        },
+        clock(),
+      ),
+    );
+
+    redirect(res, `${PORTAL_PATH}?tested=${encodeURIComponent(providerId)}`, req);
   }
 
   /**
@@ -741,6 +847,24 @@ export function createPortal(options: PortalOptions): PathHandler {
       };
     }
 
+    // The outcome is read back out of the store rather than carried in the URL,
+    // so nothing anyone can type into the address bar reaches the page.
+    const tested = known("tested");
+    if (tested !== null) {
+      const check = providers.find((provider) => provider.id === tested)?.verification;
+      if (check !== undefined && check !== null) {
+        return check.ok
+          ? {
+              kind: "ok",
+              message: `${tested} accepted the credential: ${check.summary}.`,
+            }
+          : {
+              kind: "error",
+              message: `${tested} did not check out: ${check.summary}.`,
+            };
+      }
+    }
+
     const failed = known("failed");
     if (failed !== null) {
       return {
@@ -790,6 +914,12 @@ export function createPortal(options: PortalOptions): PathHandler {
       if (path === PORTAL_LOGOUT_PATH) {
         if (method !== "POST") return methodNotAllowed(res, "POST", req);
         return handleLogout(req, res);
+      }
+
+      if (path.startsWith(PORTAL_VERIFY_PREFIX)) {
+        if (method !== "POST") return methodNotAllowed(res, "POST", req);
+        const id = decodeURIComponent(path.slice(PORTAL_VERIFY_PREFIX.length));
+        return handleVerify(req, res, id);
       }
 
       if (path.startsWith(PORTAL_KEYS_PREFIX)) {

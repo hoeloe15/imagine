@@ -13,13 +13,14 @@ import {
   type ApiKeyOption,
   type ApiKeySource,
 } from "../core/secrets.js";
+import { countOf, failureFrom } from "../core/verification.js";
 import type {
   ImageSize,
   NormalisedRequest,
   NormalisedResult,
   ProviderModel,
 } from "../core/types.js";
-import type { ImageProvider, ResolvedModel } from "./types.js";
+import type { ImageProvider, ResolvedModel, VerificationResult } from "./types.js";
 
 export const OPENROUTER_ID = "openrouter";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -87,6 +88,24 @@ export class OpenRouterProvider implements ImageProvider {
     } catch (cause) {
       if (isImagineError(cause) && cause.reason === "auth_failed") throw cause;
       return await this.#discoverModels(MODELS_FALLBACK_PATH);
+    }
+  }
+
+  /**
+   * The model list is free and needs the same key a generation does, so asking
+   * for it proves the key without spending anything. What is counted is the
+   * models that can actually produce an image, which is the number that answers
+   * "is this key any use here".
+   */
+  async verify(): Promise<VerificationResult> {
+    try {
+      const models = await this.listModels();
+      return {
+        ok: true,
+        summary: `${countOf(models.filter(producesImages).length, "image model")} visible`,
+      };
+    } catch (cause) {
+      return failureFrom(cause);
     }
   }
 
@@ -237,6 +256,17 @@ function toProviderModels(payload: Record<string, unknown>): ProviderModel[] {
   });
 }
 
+/**
+ * Both discovery paths ask for image models only, so a model that says nothing
+ * about its modalities is counted; one that says it produces something else is
+ * not.
+ */
+function producesImages(model: ProviderModel): boolean {
+  const modalities = model.capabilities["output_modalities"];
+  if (!Array.isArray(modalities)) return true;
+  return modalities.includes("image");
+}
+
 interface DecodedImage {
   b64: string;
   mediaType: string | undefined;
@@ -334,7 +364,7 @@ function httpError(status: number, parsed: unknown, raw: string): ImagineError {
   return new ImagineError(
     reason,
     `OpenRouter request failed with status ${status}: ${message}`,
-    { retryable },
+    { retryable, status },
   );
 }
 

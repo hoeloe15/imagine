@@ -17,8 +17,15 @@ import {
   type SecretResolver,
   type WritableSecretStore,
 } from "../../src/core/secrets.js";
+import { ImagineError } from "../../src/core/errors.js";
+import type { ProviderModel } from "../../src/core/types.js";
+import {
+  createVerificationStore,
+  type VerificationStore,
+} from "../../src/core/verification.js";
 import { createServer, type ServerDependencies } from "../../src/mcp/server.js";
 import { StubProvider } from "../../src/providers/stub.js";
+import type { ImageProvider } from "../../src/providers/types.js";
 import { createAuditLog } from "../../src/portal/audit.js";
 import { createPortal } from "../../src/portal/portal.js";
 import { CSRF_FIELD } from "../../src/portal/session.js";
@@ -176,6 +183,33 @@ function fakeVault(): WritableSecretStore & { entries: Map<string, string> } {
   };
 }
 
+/**
+ * An adapter that answers a verification however the test needs it to, without
+ * a network anywhere near it.
+ */
+function fakeProvider(
+  id: string,
+  listModels: () => Promise<ProviderModel[]>,
+): ImageProvider {
+  return {
+    id,
+    isConfigured: () => true,
+    listModels,
+    generate: () => Promise.reject(new Error("no test generates an image")),
+  };
+}
+
+const SEEING_MODELS = (): Promise<ProviderModel[]> =>
+  Promise.resolve([
+    { id: "stub/beacon-fast", display_name: "Beacon Fast", capabilities: {} },
+    { id: "stub/lantern-1", display_name: "Lantern 1", capabilities: {} },
+  ]);
+
+const REFUSING = (): Promise<ProviderModel[]> =>
+  Promise.reject(
+    new ImagineError("auth_failed", `OpenRouter refused ${THE_KEY}`, { status: 401 }),
+  );
+
 interface Harness {
   server: RunningHttpServer;
   base: string;
@@ -183,6 +217,7 @@ interface Harness {
   logs: string[];
   secrets: SecretResolver;
   auditFile: string;
+  verifications: VerificationStore;
 }
 
 let directory: string;
@@ -202,6 +237,8 @@ interface HarnessOptions {
   authorise?: Authoriser;
   /** What the token endpoint answers. */
   exchange?: () => Response;
+  /** The adapters the portal may ask to verify themselves. */
+  providers?: readonly ImageProvider[];
 }
 
 async function harness(options: HarnessOptions = {}): Promise<Harness> {
@@ -226,6 +263,14 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const vault = fakeVault();
   const secrets = createSecretResolver({ config, env: {}, vault });
   const logs: string[] = [];
+  const verifications = createVerificationStore({
+    costLog: config.logging.cost_log,
+    log: (line) => logs.push(line),
+  });
+  const providers = options.providers ?? [
+    fakeProvider("openrouter", SEEING_MODELS),
+    fakeProvider("azure", SEEING_MODELS),
+  ];
 
   const dependencies: ServerDependencies = {
     config,
@@ -233,7 +278,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     secrets,
     knowledge,
     ledger: new CostLedger({ budget: config.budget }),
-    providers: [new StubProvider()],
+    providers: [new StubProvider(), ...providers],
+    verifications,
   };
 
   const exchange =
@@ -253,6 +299,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     knowledge,
     auth,
     vault,
+    providers,
+    verifications,
     ...(options.authorise ? { authorise: options.authorise } : {}),
     audit: createAuditLog({
       costLog: config.logging.cost_log,
@@ -274,6 +322,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     vault,
     logs,
     secrets,
+    verifications,
     auditFile: join(directory, "audit.jsonl"),
   };
 }
@@ -904,6 +953,252 @@ describe("saving a provider key", () => {
     });
     expect(response.status).toBe(405);
     expect(response.headers.get("allow")).toBe("POST");
+  });
+});
+
+describe("testing that a key actually works", () => {
+  /** A saved key, so the provider is ready and the test button is offered. */
+  async function withKey(h: Harness): Promise<{ cookie: string; csrf: string }> {
+    const session = await signIn(h);
+    await fetch(`${h.base}/portal/keys/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie: session.cookie,
+        origin: h.base,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form({ [CSRF_FIELD]: session.csrf, action: "save", value: THE_KEY }),
+    });
+    return session;
+  }
+
+  function test(
+    h: Harness,
+    session: { cookie: string; csrf: string },
+    provider = "openrouter",
+    extra: Record<string, string> = {},
+  ): Promise<Response> {
+    return fetch(`${h.base}/portal/verify/${provider}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie: session.cookie,
+        origin: h.base,
+        "content-type": "application/x-www-form-urlencoded",
+        ...extra,
+      },
+      body: form({ [CSRF_FIELD]: session.csrf }),
+    });
+  }
+
+  it("stamps the card and says what was seen, without spending anything", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+
+    const response = await test(h, session);
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/portal?tested=openrouter");
+
+    const body = await (
+      await fetch(`${h.base}/portal?tested=openrouter`, {
+        headers: { cookie: session.cookie },
+      })
+    ).text();
+
+    expect(body).toContain("Verified just now");
+    expect(body).toContain("2 models visible");
+    expect(body).toContain("accepted the credential");
+  });
+
+  it("shows the provider's own rejection, in the provider's own terms", async () => {
+    const h = await harness({
+      providers: [fakeProvider("openrouter", REFUSING)],
+    });
+    const session = await withKey(h);
+
+    await test(h, session);
+    const body = await (
+      await fetch(`${h.base}/portal?tested=openrouter`, {
+        headers: { cookie: session.cookie },
+      })
+    ).text();
+
+    expect(body).toContain("Rejected just now — invalid key (401)");
+    expect(body).toContain("did not check out");
+    expect(body).not.toContain(THE_KEY);
+    expect(body).not.toContain(THE_KEY.slice(-4));
+  });
+
+  it("remembers the outcome for the next visit", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+    await test(h, session);
+
+    expect(await h.verifications.get("openrouter")).toMatchObject({
+      ok: true,
+      summary: "2 models visible",
+      reason: null,
+    });
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie: session.cookie } })
+    ).text();
+    expect(body).toContain("Verified just now");
+  });
+
+  it("forgets the stamp when the key it vouched for is replaced", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+    await test(h, session);
+    expect(await h.verifications.get("openrouter")).not.toBeNull();
+
+    await fetch(`${h.base}/portal/keys/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie: session.cookie,
+        origin: h.base,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form({ [CSRF_FIELD]: session.csrf, action: "save", value: `${THE_KEY}-2` }),
+    });
+
+    expect(await h.verifications.get("openrouter")).toBeNull();
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie: session.cookie } })
+    ).text();
+    expect(body).toContain("Not verified yet");
+    expect(body).not.toContain("Verified just now");
+  });
+
+  it("says nothing has been checked yet before anyone checks", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie: session.cookie } })
+    ).text();
+
+    expect(body).toContain("Not verified yet");
+    expect(body).toContain('action="/portal/verify/openrouter"');
+  });
+
+  it("leaves one audit line naming the caller, the provider and the outcome", async () => {
+    const h = await harness({ providers: [fakeProvider("openrouter", REFUSING)] });
+    const session = await withKey(h);
+    await test(h, session);
+
+    const lines = (await readFile(h.auditFile, "utf8")).trim().split("\n");
+    const record = JSON.parse(lines[lines.length - 1] ?? "{}") as Record<
+      string,
+      unknown
+    >;
+
+    expect(record["action"]).toBe("provider.verify");
+    expect(record["caller_id"]).toBe("https://example.authkit.app:user_01");
+    expect(record["target"]).toBe("openrouter");
+    expect(record["outcome"]).toBe("failed");
+    expect(record["detail"]).toBe("invalid key (401)");
+    expect(JSON.stringify(record)).not.toContain(THE_KEY);
+    expect(h.logs.join("\n")).not.toContain(THE_KEY);
+  });
+
+  it("refuses a test with no session at all", async () => {
+    const h = await harness();
+    const response = await fetch(`${h.base}/portal/verify/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: h.base, "content-type": "application/x-www-form-urlencoded" },
+      body: form({ [CSRF_FIELD]: "anything" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await h.verifications.get("openrouter")).toBeNull();
+  });
+
+  it("refuses a test with no CSRF token", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+
+    const response = await fetch(`${h.base}/portal/verify/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie: session.cookie,
+        origin: h.base,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form({}),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await h.verifications.get("openrouter")).toBeNull();
+  });
+
+  it("refuses a test from a foreign origin even with a valid token", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+
+    const response = await test(h, session, "openrouter", {
+      origin: "https://attacker.example",
+    });
+
+    expect(response.status).toBe(403);
+    expect(await h.verifications.get("openrouter")).toBeNull();
+  });
+
+  it("does not test a provider the configuration does not name", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+
+    const response = await test(h, session, "made-up");
+    expect(response.headers.get("location")).toBe("/portal?failed=made-up");
+    expect(await h.verifications.get("made-up")).toBeNull();
+  });
+
+  it("does not test a provider with no key to test", async () => {
+    const h = await harness();
+    const session = await signIn(h);
+
+    const response = await test(h, session);
+    expect(response.headers.get("location")).toBe("/portal?failed=openrouter");
+    expect(await h.verifications.get("openrouter")).toBeNull();
+  });
+
+  it("answers a GET on the test route with 405, because GET changes nothing", async () => {
+    const h = await harness();
+    const response = await fetch(`${h.base}/portal/verify/openrouter`, {
+      redirect: "manual",
+    });
+
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("POST");
+  });
+
+  it("tells a chat client the same thing through list_capabilities", async () => {
+    const h = await harness();
+    const session = await withKey(h);
+    await test(h, session);
+
+    const response = await fetch(`${h.base}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "list_capabilities", arguments: {} },
+      }),
+    });
+
+    const text = await response.text();
+    expect(text).toContain("last_verified");
+    expect(text).toContain("2 models visible");
+    expect(text).not.toContain(THE_KEY);
   });
 });
 

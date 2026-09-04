@@ -10,6 +10,7 @@ import {
   dashboardPage,
   loginPage,
   messagePage,
+  relativeTime,
   STYLESHEET,
   type DashboardView,
   type ModelRow,
@@ -39,6 +40,8 @@ function provider(over: Partial<ProviderView> = {}): ProviderView {
     writable: true,
     note: null,
     models: [model()],
+    testLabel: "Test key",
+    verification: null,
     ...over,
   };
 }
@@ -153,6 +156,131 @@ describe("the model list under a provider", () => {
   it("says so plainly when no curated model reaches a provider", () => {
     const html = dashboardPage(view({ providers: [provider({ models: [] })] }));
     expect(html).toContain("No curated model reaches this provider yet");
+  });
+});
+
+describe("the verification line on a card", () => {
+  it("offers the test and says nothing has been checked yet", () => {
+    const html = dashboardPage(view());
+
+    expect(html).toContain('action="/portal/verify/azure"');
+    expect(html).toContain(">Test key<");
+    expect(html).toContain("Not verified yet");
+  });
+
+  it("calls it testing access where the identity is the credential", () => {
+    const html = dashboardPage(
+      view({ providers: [provider({ writable: false, testLabel: "Test access" })] }),
+    );
+
+    expect(html).toContain(">Test access<");
+  });
+
+  it("stamps a success with how long ago it was and what was seen", () => {
+    const html = dashboardPage(
+      view({
+        providers: [
+          provider({
+            verification: {
+              ok: true,
+              summary: "31 image models visible",
+              relative: "3 min ago",
+              reason: null,
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(html).toContain("Verified 3 min ago — 31 image models visible");
+    expect(html).toContain('class="verify verified"');
+  });
+
+  it("says rejected, in red, when the provider refused the credential", () => {
+    const html = dashboardPage(
+      view({
+        providers: [
+          provider({
+            verification: {
+              ok: false,
+              summary: "invalid key (401)",
+              relative: "3 min ago",
+              reason: "auth_failed",
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(html).toContain("Rejected 3 min ago — invalid key (401)");
+    expect(html).toContain('class="verify rejected"');
+  });
+
+  it("separates a check that found nothing out from one that failed", () => {
+    const html = dashboardPage(
+      view({
+        providers: [
+          provider({
+            verification: {
+              ok: false,
+              summary: "the provider could not be reached",
+              relative: "1 hour ago",
+              reason: "provider_unavailable",
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(html).toContain("Not verified 1 hour ago");
+    expect(html).toContain('class="verify unproven"');
+    expect(html).not.toContain("Rejected");
+  });
+
+  it("offers no button and no line where there is nothing to test", () => {
+    const html = dashboardPage(
+      view({ providers: [provider({ testLabel: null, writable: false })] }),
+    );
+
+    expect(html).not.toContain("/portal/verify/");
+    expect(html).not.toContain("Not verified yet");
+  });
+
+  it("escapes a summary, which comes from outside this process", () => {
+    const html = dashboardPage(
+      view({
+        providers: [
+          provider({
+            verification: {
+              ok: false,
+              summary: '<script>alert("x")</script>',
+              relative: "just now",
+              reason: "unknown",
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(html).not.toContain("<script");
+  });
+});
+
+describe("relative time, rendered by the server because there is no script", () => {
+  const at = new Date("2026-09-04T12:00:00.000Z");
+  const after = (seconds: number): Date => new Date(at.getTime() + seconds * 1000);
+
+  it("rounds down to whole units a person would say", () => {
+    expect(relativeTime(at, after(5))).toBe("just now");
+    expect(relativeTime(at, after(60))).toBe("1 min ago");
+    expect(relativeTime(at, after(3 * 60 + 40))).toBe("3 min ago");
+    expect(relativeTime(at, after(60 * 60))).toBe("1 hour ago");
+    expect(relativeTime(at, after(5 * 60 * 60))).toBe("5 hours ago");
+    expect(relativeTime(at, after(50 * 60 * 60))).toBe("2 days ago");
+  });
+
+  it("does not say a check happened in the future", () => {
+    expect(relativeTime(at, after(-90))).toBe("just now");
   });
 });
 

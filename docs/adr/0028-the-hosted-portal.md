@@ -6,7 +6,7 @@
 [ADR 0023](0023-oidc-issuer-mode.md),
 [ADR 0025](0025-membership-allowlist.md),
 [ADR 0026](0026-runtime-provider-secrets-from-key-vault.md)
-**Closes:** issues #60, #61
+**Closes:** issues #60, #61, #64
 **Design:** `docs/design/hosted-portal.md` §2.2, §2.3, §2.5
 
 ## Context
@@ -162,6 +162,43 @@ is one.
 **That destination is a stopgap and is written down as one.** When the durable
 store lands, these records move there with a `type` field beside the cost
 records, so there is one place to answer "who changed what".
+
+### Amendment, 2026-09-04: testing that a key actually works (issue #64)
+
+Saving a key proved only that it was stored. Whether it *works* first showed up
+on a paid generation, which is the wrong place to learn it. So the card carries a
+**Test key** button — **Test access** where a managed identity is the credential
+— behind `POST /portal/verify/<provider>` with exactly the checks the key form is
+behind: session, `Origin`/`Sec-Fetch-Site`, and the same per-session CSRF token.
+
+Three things about it are decisions rather than details:
+
+1. **The adapter answers, not the portal.** `ImageProvider` gains an optional
+   `verify()`; without one, `core/verification.ts` calls `listModels()`, which is
+   a free `GET` for every adapter that has one. So the portal knows nothing about
+   any provider, exactly as `/mcp` does not.
+2. **The sentence shown is derived, never quoted.** It is built from the HTTP
+   status and the `FailureReason` the adapter already maps to — `401` is
+   "invalid key", `402` is "no credits" — and never from the provider's response
+   body, because a body can echo back what was sent and the sentence is both
+   rendered and written to disk. `ImagineError` therefore carries the status
+   alongside the reason: a `401` and a `402` are both `auth_failed`, and only one
+   of them is a bad key.
+3. **Azure is verified honestly, or not called verified.** Azure publishes no
+   listing of image deployments, so the check reads the resource's model list. In
+   `api_key` mode a `200` is the resource accepting the key and a `401`/`403` is
+   it refusing; anything else is reported as having proven nothing rather than as
+   a failure. In `entra` mode it means the identity obtained a token for the
+   scope a generation would use, and where the resource offers no listing the
+   line says outright that this **proves the identity, not the deployment**.
+   Three states, not two: verified, rejected, and "the check found nothing out",
+   which is amber because an unreachable endpoint says nothing about a key.
+
+The outcome per provider is kept in `verifications.json` beside the cost log —
+**the same stopgap as the audit file, and it moves to the durable store with it**
+(#45/#17) — and `list_capabilities` reports it as `last_verified`, so a chat
+client can say "stored and verified three minutes ago". Every test leaves an
+audit line (`provider.verify`) with the caller, the provider and the outcome.
 
 ### Bicep adds two strings and no resource
 

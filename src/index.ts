@@ -53,6 +53,8 @@ async function serveHttp(): Promise<void> {
           config: dependencies.config,
           secrets: dependencies.secrets,
           knowledge: dependencies.knowledge,
+          providers: dependencies.providers,
+          verifications: dependencies.verifications,
           auth,
           ...(dependencies.vault ? { vault: dependencies.vault } : {}),
           ...(authenticate ? { authenticate } : {}),

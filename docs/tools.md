@@ -128,13 +128,19 @@ data is. Read-only, costs nothing, and never returns a key
       "id": "openrouter",
       "status": "ready",
       "models": ["openai/gpt-image-2", "google/gemini-3.1-flash-image", "..."],
-      "models_source": "live"
+      "models_source": "live",
+      "last_verified": {
+        "at": "2026-09-04T09:41:12.004Z",
+        "ok": true,
+        "summary": "31 image models visible"
+      }
     },
     {
       "id": "azure",
       "status": "not_configured",
       "models": ["gpt-image-2"],
       "models_source": "curated",
+      "last_verified": null,
       "note": "Disabled in configuration."
     }
   ],
@@ -174,6 +180,13 @@ data is. Read-only, costs nothing, and never returns a key
 _(Provider and model lists abridged; a real answer lists all four curated models
 and every provider the config names.)_ A `not_configured` provider whose key
 variable is simply unset reports it under `missing`, by name — never by value.
+
+`last_verified` is the last time somebody pressed **Test key** in the portal for
+that provider, and what came back: `null` when nobody ever has, `ok: false` with
+a summary such as `"invalid key (401)"` when the provider refused the credential.
+It is what lets a chat client say "the key is stored *and* it works" rather than
+just "stored". The summary is derived from the status code and the failure
+reason, never from the provider's response body, so it can never carry a key.
 
 ## `recommend_model`
 

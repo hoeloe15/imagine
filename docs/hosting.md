@@ -255,8 +255,39 @@ and says plainly that it cannot save anything.
 portal login exactly as it is to a tool call — an account that is not on it gets
 a `403` that explains itself, not a login loop.
 
-**Every write leaves one audit line** with the caller, the action, the secret's
-*name*, and the outcome. Hosted, that goes to the container log stream, which is
+**Test the key before you trust it.** Saving a key proves it was stored, not
+that it works — that used to show up on the first paid generation. Each provider
+card now carries a **Test key** button (**Test access** where the deployment's
+own managed identity is the credential). It makes one free, side-effect-free
+call, generates nothing, and stamps the card with what came back:
+
+- `Verified 3 min ago — 31 image models visible` when the provider accepted it.
+- `Rejected 3 min ago — invalid key (401)` when it refused it, in the provider's
+  own terms: `401` is a bad key, `402` is empty credits.
+- `Not verified …` in amber when the check found nothing out — an endpoint that
+  could not be reached says nothing about the key, and the page does not pretend
+  otherwise.
+
+**What the test proves for Azure is narrower, and the page says so.** Azure
+publishes no listing of image *deployments*, so the check reads the resource's
+model list instead:
+
+- With an API key, a `200` means the resource accepted the key and a `401`/`403`
+  means it refused it. Any other answer is reported as proving nothing.
+- With a managed identity, it means the identity obtained a token for the scope a
+  generation would use and — where the resource offers the listing — that the
+  resource accepted that token. Where it does not (a MAI-only resource, for
+  instance), the line says in as many words that this **proves the identity, not
+  the deployment**.
+
+The last outcome per provider is remembered in `verifications.json` beside the
+cost log, so the stamp is still there on the next visit, and `list_capabilities`
+reports the same fact as `last_verified`. Like the audit file, that location is a
+stopgap until the durable store lands.
+
+**Every write and every test leaves one audit line** with the caller, the action
+(`secret.set`, `secret.clear`, `provider.verify`), the secret's *name* where one
+was written, and the outcome. Hosted, that goes to the container log stream, which is
 shipped to Log Analytics and survives the revision that empties the filesystem.
 Locally it is also appended to `audit.jsonl` beside the cost log. That log stream
 is a stopgap until there is a durable store, and it is written down as one rather

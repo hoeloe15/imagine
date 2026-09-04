@@ -23,6 +23,7 @@ export const PORTAL_CALLBACK_PATH = `${PORTAL_PATH}/auth/callback`;
 export const PORTAL_LOGOUT_PATH = `${PORTAL_PATH}/auth/logout`;
 export const PORTAL_STYLE_PATH = `${PORTAL_PATH}/style.css`;
 export const PORTAL_KEYS_PREFIX = `${PORTAL_PATH}/keys/`;
+export const PORTAL_VERIFY_PREFIX = `${PORTAL_PATH}/verify/`;
 
 export const PORTAL_ENABLED_ENV = "IMAGINE_PORTAL_ENABLED";
 export const PORTAL_CLIENT_ID_ENV = "IMAGINE_PORTAL_WORKOS_CLIENT_ID";

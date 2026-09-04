@@ -34,6 +34,12 @@ export interface ImagineErrorOptions extends ErrorOptions {
    * an unbilled failure must not count against a budget.
    */
   billed?: boolean;
+  /**
+   * The HTTP status the provider answered with, when there was one. Carried so
+   * that a caller can tell apart two failures the same reason covers — a 401
+   * and a 402 are both `auth_failed`, and only one of them is a bad key.
+   */
+  status?: number;
 }
 
 /**
@@ -45,6 +51,7 @@ export class ImagineError extends Error {
   readonly reason: FailureReason;
   readonly retryable: boolean;
   readonly billed: boolean;
+  readonly status: number | undefined;
 
   constructor(
     reason: FailureReason,
@@ -55,6 +62,7 @@ export class ImagineError extends Error {
     this.reason = reason;
     this.retryable = options.retryable ?? false;
     this.billed = options.billed ?? false;
+    this.status = options.status;
   }
 }
 

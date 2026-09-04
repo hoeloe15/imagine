@@ -30,6 +30,10 @@ import {
   type WritableSecretStore,
 } from "./core/secrets.js";
 import {
+  createVerificationStore,
+  type VerificationStore,
+} from "./core/verification.js";
+import {
   AZURE_ID,
   AzureProvider,
   type AccessTokenProvider,
@@ -68,6 +72,12 @@ export interface ImagineDependencies extends ServerDependencies {
   secrets: SecretResolver;
   /** Present only where a vault and a managed identity are both configured. */
   vault?: WritableSecretStore;
+  /**
+   * One store, shared: the portal records a verification into it and
+   * `list_capabilities` reads the same one back, so a chat client can say what
+   * the page says without waiting for a file to be re-read.
+   */
+  verifications: VerificationStore;
 }
 
 export async function buildDependencies(
@@ -90,6 +100,7 @@ export async function buildDependencies(
     config,
     env: loaded.env,
     secrets: resolver,
+    verifications: createVerificationStore({ costLog: config.logging.cost_log }),
     ...(vault === undefined ? {} : { vault }),
     ...(outputSink === undefined ? {} : { sink: outputSink }),
     knowledge: loadBundledModelKnowledge(),

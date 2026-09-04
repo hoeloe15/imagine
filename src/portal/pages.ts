@@ -14,6 +14,7 @@
  * shown is presence, source and the *name* of the place a key would live.
  */
 
+import type { FailureReason } from "../core/errors.js";
 import type { SecretSourceKind } from "../core/secrets.js";
 import type { UseCase } from "../core/types.js";
 import { CSRF_FIELD } from "./session.js";
@@ -23,6 +24,7 @@ import {
   PORTAL_LOGOUT_PATH,
   PORTAL_PATH,
   PORTAL_STYLE_PATH,
+  PORTAL_VERIFY_PREFIX,
 } from "./settings.js";
 
 export type ProviderStatus = "ready" | "not_configured" | "disabled";
@@ -44,6 +46,18 @@ export interface ModelRow {
   reach: ModelReach;
 }
 
+/**
+ * The last verification, as a line on the card. The relative time is worked out
+ * before rendering, because the page carries no script to work it out with.
+ */
+export interface VerificationView {
+  ok: boolean;
+  summary: string;
+  /** "3 min ago". */
+  relative: string;
+  reason: FailureReason | null;
+}
+
 export interface ProviderView {
   id: string;
   status: ProviderStatus;
@@ -56,6 +70,14 @@ export interface ProviderView {
   note: string | null;
   /** Curated models this provider can serve, from the knowledge file. */
   models: readonly ModelRow[];
+  /**
+   * The label of the button that checks the credential, or `null` when there is
+   * nothing here to check — "Test key" where a key is stored, "Test access"
+   * where the deployment's own identity is the credential.
+   */
+  testLabel: string | null;
+  /** The outcome of the last check, or `null` when none has run. */
+  verification: VerificationView | null;
 }
 
 /** What `recommend_model` would answer for one use case, as a line on the page. */
@@ -310,6 +332,53 @@ function form(provider: ProviderView, csrf: string): string {
   ].join("\n");
 }
 
+/**
+ * A time on the page without a script to compute it: whole units, rounded down,
+ * because "3 min ago" is what a person wants and a second's precision is noise.
+ */
+export function relativeTime(at: Date, now: Date): string {
+  const seconds = Math.round((now.getTime() - at.getTime()) / 1000);
+  if (seconds < 0) return "just now";
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} ${days === 1 ? "day" : "days"} ago`;
+}
+
+/**
+ * Three states, three colours: it worked, the provider refused the credential,
+ * or the check found nothing out. The last is amber rather than red because an
+ * endpoint that could not be reached says nothing about the key.
+ */
+function verificationLine(provider: ProviderView): string {
+  const check = provider.verification;
+  if (check === null) {
+    return provider.testLabel === null
+      ? ""
+      : '<p class="verify unverified">Not verified yet.</p>';
+  }
+
+  const detail = `${escape(check.relative)} — ${escape(check.summary)}`;
+  if (check.ok) return `<p class="verify verified">Verified ${detail}</p>`;
+  if (check.reason === "auth_failed") {
+    return `<p class="verify rejected">Rejected ${detail}</p>`;
+  }
+  return `<p class="verify unproven">Not verified ${detail}</p>`;
+}
+
+function verifyForm(provider: ProviderView, csrf: string): string[] {
+  if (provider.testLabel === null) return [];
+  return [
+    `<form method="post" action="${PORTAL_VERIFY_PREFIX}${encodeURIComponent(provider.id)}" class="inline verifyform">`,
+    `<input type="hidden" name="${CSRF_FIELD}" value="${escape(csrf)}">`,
+    `<button type="submit" class="secondary">${escape(provider.testLabel)}</button>`,
+    "</form>",
+  ];
+}
+
 function providerCard(provider: ProviderView, view: DashboardView): string {
   const source = sourceLine(provider);
   const why = escape(
@@ -325,6 +394,9 @@ function providerCard(provider: ProviderView, view: DashboardView): string {
       : `<p class="muted">${why}</p>`;
 
   const chip = keyChip(provider);
+  const verify = verifyForm(provider, view.csrf);
+  const act = [...(body === "" ? [] : [body]), ...verify];
+  const line = verificationLine(provider);
 
   return [
     '<section class="provider">',
@@ -334,8 +406,9 @@ function providerCard(provider: ProviderView, view: DashboardView): string {
     ...(chip === null ? [] : [`<span class="key-chip">${chip}</span>`]),
     "</div>",
     `<p class="source">${source}</p>`,
+    ...(line === "" ? [] : [line]),
     modelList(provider),
-    ...(body === "" ? [] : [`<div class="provider-act">${body}</div>`]),
+    ...(act.length === 0 ? [] : ['<div class="provider-act">', ...act, "</div>"]),
     "</section>",
   ].join("\n");
 }
@@ -648,6 +721,17 @@ strong { color: var(--ink); font-weight: 620; }
   border-color: var(--warn);
   background: var(--warn-soft);
 }
+.verify {
+  font-size: var(--t-small);
+  margin: 0 0 var(--s4);
+  padding-left: var(--s3);
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+.verify.verified { border-left-color: var(--good); color: var(--good); }
+.verify.rejected { border-left-color: var(--bad); color: var(--bad); }
+.verify.unproven { border-left-color: var(--warn); color: var(--warn); }
+.verifyform { margin-top: var(--s2); }
 .models-head {
   display: flex;
   justify-content: space-between;

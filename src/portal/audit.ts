@@ -10,7 +10,9 @@
  * the local half, and is skipped when there is no cost log to sit beside.
  *
  * A secret value never reaches either. The record holds the caller, the action,
- * the secret's name and the outcome, and there is no field a value could go in.
+ * the secret's name where one was written, and the outcome, and there is no
+ * field a value could go in — a verification records what the provider answered
+ * in the same shape, derived from a status code rather than quoted from a body.
  */
 
 import { appendFile, mkdir } from "node:fs/promises";
@@ -18,7 +20,7 @@ import path from "node:path";
 
 export const AUDIT_LOG_NAME = "audit.jsonl";
 
-export type AuditAction = "secret.set" | "secret.clear";
+export type AuditAction = "secret.set" | "secret.clear" | "provider.verify";
 
 export interface AuditRecord {
   type: "audit";
@@ -27,8 +29,8 @@ export interface AuditRecord {
   action: AuditAction;
   /** The provider the action was about. */
   target: string;
-  /** The *name* of the secret written, never its value. */
-  secret_name: string;
+  /** The *name* of the secret written, never its value. Absent when none was. */
+  secret_name?: string;
   outcome: "ok" | "failed";
   /** Present only on a failure, and never the value that failed to write. */
   detail?: string;
