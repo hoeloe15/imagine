@@ -520,20 +520,40 @@ export function createPortal(options: PortalOptions): PathHandler {
     return true;
   }
 
+  /**
+   * A matching `Origin` is the protection; `Sec-Fetch-Site` only backs it up.
+   * Browsers differ in what they send on a same-origin form post (some omit
+   * `Origin`, some say `same-site` behind an ingress), so either signal alone
+   * is accepted when it is unambiguous, and a refusal logs what was seen.
+   */
   function sameSite(req: IncomingMessage): boolean {
     const site = header(req, "sec-fetch-site");
-    if (site !== undefined && site !== "same-origin" && site !== "none") return false;
-
     const origin = header(req, "origin");
-    if (origin === undefined) return false;
-
     const host = header(req, "host");
+
+    if (site === "cross-site") return refuseSite(site, origin, host);
+
     const acceptable = new Set([new URL(settings.baseUrl).origin]);
     if (host !== undefined) {
       acceptable.add(`https://${host}`);
       acceptable.add(`http://${host}`);
     }
-    return acceptable.has(origin);
+
+    if (origin !== undefined) {
+      return acceptable.has(origin) || refuseSite(site, origin, host);
+    }
+    return site === "same-origin" || site === "none" || refuseSite(site, origin, host);
+  }
+
+  function refuseSite(
+    site: string | undefined,
+    origin: string | undefined,
+    host: string | undefined,
+  ): false {
+    process.stderr.write(
+      `imagine: portal refused a form post - sec-fetch-site=${site ?? "-"} origin=${origin ?? "-"} host=${host ?? "-"} expected=${new URL(settings.baseUrl).origin}\n`,
+    );
+    return false;
   }
 
   function insecurePage(): string {
@@ -641,7 +661,10 @@ export function createPortal(options: PortalOptions): PathHandler {
     },
 
     async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-      const path = new URL(req.url ?? "/", "http://placeholder").pathname;
+      const rawPath = new URL(req.url ?? "/", "http://placeholder").pathname;
+      // `/portal/` and `/portal` are the same page to a person typing a URL.
+      const path =
+        rawPath.length > 1 && rawPath.endsWith("/") ? rawPath.slice(0, -1) : rawPath;
       const method = req.method ?? "GET";
 
       if (path === PORTAL_STYLE_PATH) {
