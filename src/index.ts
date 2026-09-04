@@ -52,6 +52,7 @@ async function serveHttp(): Promise<void> {
           settings: portalConfiguration.settings,
           config: dependencies.config,
           secrets: dependencies.secrets,
+          knowledge: dependencies.knowledge,
           auth,
           ...(dependencies.vault ? { vault: dependencies.vault } : {}),
           ...(authenticate ? { authenticate } : {}),

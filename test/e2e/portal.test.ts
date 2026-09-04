@@ -65,6 +65,78 @@ const knowledge = parseModelKnowledge({
       max_size: "1024x1024",
       notes: "Only exists in tests.",
     },
+    {
+      id: "lantern-1",
+      display_name: "Lantern 1",
+      family: "stub",
+      leaderboard: null,
+      strengths: {
+        text_in_image: 5,
+        photoreal: 3,
+        illustration: 3,
+        diagram: 3,
+        fast_bulk: 2,
+      },
+      typical_latency_s: 12,
+      price: {
+        per_image_usd: 0.19,
+        per_image_usd_4k: null,
+        confidence: "indicative",
+        checked: "2026-08-26",
+      },
+      availability: [
+        { provider: "azure", model_ref: "lantern-1" },
+        { provider: "openrouter", model_ref: "stub/lantern-1" },
+      ],
+      max_size: "1536x1024",
+      notes: "Only exists in tests.",
+    },
+    {
+      id: "harbour-2",
+      display_name: "Harbour 2",
+      family: "stub",
+      leaderboard: null,
+      strengths: {
+        text_in_image: 3,
+        photoreal: 5,
+        illustration: 4,
+        diagram: 3,
+        fast_bulk: 2,
+      },
+      typical_latency_s: 40,
+      price: {
+        per_image_usd: 0.048,
+        per_image_usd_4k: null,
+        confidence: "indicative",
+        checked: "2026-08-26",
+      },
+      availability: [{ provider: "azure", model_ref: "harbour-2" }],
+      max_size: "1024x1024",
+      notes: "Only exists in tests.",
+    },
+    {
+      id: "beacon-fast",
+      display_name: "Beacon Fast",
+      family: "stub",
+      leaderboard: null,
+      strengths: {
+        text_in_image: 2,
+        photoreal: 3,
+        illustration: 4,
+        diagram: 3,
+        fast_bulk: 5,
+      },
+      typical_latency_s: 3,
+      price: {
+        per_image_usd: 0.02,
+        per_image_usd_4k: null,
+        confidence: "confirmed",
+        checked: "2026-08-26",
+      },
+      availability: [{ provider: "openrouter", model_ref: "stub/beacon-fast" }],
+      max_size: "1024x1024",
+      notes: "Only exists in tests.",
+    },
   ],
 });
 
@@ -139,6 +211,18 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     logging: { ...DEFAULT_CONFIG.logging, cost_log: join(directory, "costs.jsonl") },
   };
 
+  // An Azure resource with two deployments, which is the case the dashboard's
+  // model list exists for: the catalogue is bigger than what this resource serves.
+  const azure = config.providers["azure"];
+  if (azure !== undefined) {
+    azure.enabled = true;
+    azure.endpoint = "https://example.openai.azure.com";
+    azure.deployments = {
+      "lantern-1": "lantern-prod",
+      "harbour-2": { deployment: "harbour-2-6", dialect: "mai" },
+    };
+  }
+
   const vault = fakeVault();
   const secrets = createSecretResolver({ config, env: {}, vault });
   const logs: string[] = [];
@@ -166,6 +250,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     settings,
     config,
     secrets,
+    knowledge,
     auth,
     vault,
     ...(options.authorise ? { authorise: options.authorise } : {}),
@@ -432,6 +517,98 @@ describe("the dashboard", () => {
     expect(body).toContain("azure");
     expect(body).toContain("no key yet");
   });
+
+  it("lists, per provider, the curated models it can actually serve", async () => {
+    const h = await harness();
+    const { cookie } = await signIn(h);
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie } })
+    ).text();
+
+    // Reachable through OpenRouter, so it appears; only OpenRouter lists it.
+    expect(body).toContain("Beacon Fast");
+    // Both providers list Lantern 1, so it appears under each of them.
+    expect(body.match(/class="model-name">Lantern 1</g)?.length).toBe(2);
+    // Not curated for any configured provider, so it appears nowhere.
+    expect(body).not.toContain("Stub Image 1");
+  });
+
+  it("names the Azure deployment each model maps to, from the configuration", async () => {
+    const h = await harness();
+    const { cookie } = await signIn(h);
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie } })
+    ).text();
+
+    expect(body).toContain("lantern-prod");
+    expect(body).toContain("harbour-2-6");
+  });
+
+  it("marks a model behind a missing key rather than pretending it is reachable", async () => {
+    const h = await harness();
+    const { cookie } = await signIn(h);
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie } })
+    ).text();
+
+    expect(body).toContain("after you add a key");
+  });
+
+  it("says what each use case is waiting for while nothing is reachable", async () => {
+    const h = await harness();
+    const { cookie } = await signIn(h);
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie } })
+    ).text();
+
+    expect(body).toContain("Which model for what?");
+    expect(body).toContain("nothing reachable yet");
+    expect(body).toContain("Best overall: Lantern 1");
+  });
+
+  it("answers each use case with a reachable model once a key is saved", async () => {
+    const h = await harness();
+    const { cookie, csrf } = await signIn(h);
+
+    await fetch(`${h.base}/portal/keys/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie,
+        origin: h.base,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form({ [CSRF_FIELD]: csrf, action: "save", value: THE_KEY }),
+    });
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie } })
+    ).text();
+
+    expect(body).not.toContain("nothing reachable yet");
+    // Lantern 1 is the strongest at text in image and OpenRouter now reaches it.
+    expect(body).toContain("via openrouter");
+    // Harbour 2 is the best photoreal model but only Azure has it.
+    expect(body).toContain("Best overall: Harbour 2");
+  });
+
+  it("prices every model and marks the indicative ones, with the knowledge date", async () => {
+    const h = await harness();
+    const { cookie } = await signIn(h);
+
+    const body = await (
+      await fetch(`${h.base}/portal`, { headers: { cookie } })
+    ).text();
+
+    expect(body).toContain("$0.190");
+    expect(body).toContain("$0.020");
+    expect(body).toContain('class="approx"');
+    expect(body).toContain("Knowledge updated 2026-08-26");
+  });
 });
 
 describe("saving a provider key", () => {
@@ -595,6 +772,47 @@ describe("saving a provider key", () => {
       headers: {
         cookie,
         origin: h.base,
+        "sec-fetch-site": "cross-site",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form({ [CSRF_FIELD]: csrf, action: "save", value: THE_KEY }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(h.vault.entries.size).toBe(0);
+  });
+
+  it('accepts the literal Origin "null" Chromium sends on a same-origin post', async () => {
+    const h = await harness();
+    const { cookie, csrf } = await signIn(h);
+
+    const response = await fetch(`${h.base}/portal/keys/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie,
+        origin: "null",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form({ [CSRF_FIELD]: csrf, action: "save", value: THE_KEY }),
+    });
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/portal?saved=openrouter");
+    expect(h.vault.entries.get("openrouter-api-key")).toBe(THE_KEY);
+  });
+
+  it('refuses the same "null" Origin when the browser calls it cross-site', async () => {
+    const h = await harness();
+    const { cookie, csrf } = await signIn(h);
+
+    const response = await fetch(`${h.base}/portal/keys/openrouter`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        cookie,
+        origin: "null",
         "sec-fetch-site": "cross-site",
         "content-type": "application/x-www-form-urlencoded",
       },

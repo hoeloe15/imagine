@@ -15,6 +15,7 @@
  */
 
 import type { SecretSourceKind } from "../core/secrets.js";
+import type { UseCase } from "../core/types.js";
 import { CSRF_FIELD } from "./session.js";
 import {
   PORTAL_KEYS_PREFIX,
@@ -26,6 +27,23 @@ import {
 
 export type ProviderStatus = "ready" | "not_configured" | "disabled";
 
+/** Why a curated model is or is not reachable through the provider listing it. */
+export type ModelReach = "ready" | "needs_key" | "needs_deployment" | "needs_enabling";
+
+/** One curated model as it appears under the provider that can serve it. */
+export interface ModelRow {
+  id: string;
+  name: string;
+  /** The use cases this model scores highest on, best-first. */
+  goodFor: readonly UseCase[];
+  perImageUsd: number;
+  /** `data/models.json` says the price is derived rather than published. */
+  indicativePrice: boolean;
+  /** The deployment this provider's config maps the model to, when it names one. */
+  deployment: string | null;
+  reach: ModelReach;
+}
+
 export interface ProviderView {
   id: string;
   status: ProviderStatus;
@@ -36,6 +54,17 @@ export interface ProviderView {
   /** Whether this page can write this provider's key at all. */
   writable: boolean;
   note: string | null;
+  /** Curated models this provider can serve, from the knowledge file. */
+  models: readonly ModelRow[];
+}
+
+/** What `recommend_model` would answer for one use case, as a line on the page. */
+export interface UseCasePick {
+  useCase: UseCase;
+  /** The best model reachable right now, or `null` when nothing is. */
+  now: { model: string; provider: string } | null;
+  /** The best model ignoring readiness, shown only when it differs from `now`. */
+  overall: { model: string; provider: string } | null;
 }
 
 export interface DashboardView {
@@ -44,6 +73,9 @@ export interface DashboardView {
   subject: string;
   csrf: string;
   providers: readonly ProviderView[];
+  picks: readonly UseCasePick[];
+  /** The `updated` date of `data/models.json`, so staleness is visible. */
+  knowledgeUpdated: string;
   /** A one-line result of the last write, already safe to show. */
   flash: { kind: "ok" | "error"; message: string } | null;
   /** Why no form is offered, when none is. */
@@ -53,6 +85,14 @@ export interface DashboardView {
 /** Where an AI client points itself. A path, so it is right on any host. */
 const MCP_PATH = "/mcp";
 const DOCS_URL = "https://github.com/hoeloe15/imagine#readme";
+
+const USE_CASE_LABELS: Record<UseCase, string> = {
+  text_in_image: "text in image",
+  photoreal: "photoreal",
+  illustration: "illustration",
+  diagram: "diagrams",
+  fast_bulk: "fast bulk",
+};
 
 export function escape(value: string): string {
   return value
@@ -147,6 +187,15 @@ function statusLabel(status: ProviderStatus): string {
   return "no key yet";
 }
 
+/** Where the key comes from, in three words, next to the status pill. */
+function keyChip(provider: ProviderView): string | null {
+  if (provider.status === "disabled") return null;
+  if (provider.keySource === "vault") return "key from Key Vault";
+  if (provider.keySource === "env") return "key from the environment";
+  if (provider.status === "ready") return "managed identity";
+  return null;
+}
+
 function sourceLine(provider: ProviderView): string {
   if (provider.status === "disabled") {
     return provider.note === null
@@ -162,6 +211,76 @@ function sourceLine(provider: ProviderView): string {
   return provider.note === null
     ? "No key has been set for it yet."
     : escape(provider.note);
+}
+
+/** Three decimals throughout, so the column lines up under tabular figures. */
+function money(usd: number): string {
+  return `$${usd.toFixed(3)}`;
+}
+
+function goodForLine(useCases: readonly UseCase[]): string {
+  return useCases.map((useCase) => USE_CASE_LABELS[useCase]).join(", ");
+}
+
+function modelPrice(model: ModelRow): string {
+  if (!model.indicativePrice) {
+    return `<span class="model-price">${money(model.perImageUsd)}</span>`;
+  }
+  return [
+    '<span class="model-price">',
+    '<abbr class="approx" title="Indicative: derived or unpublished, not a confirmed list price.">~</abbr>',
+    money(model.perImageUsd),
+    "</span>",
+  ].join("");
+}
+
+const WAITING_FOR: Record<Exclude<ModelReach, "ready">, string> = {
+  needs_key: "after you add a key",
+  needs_enabling: "after you enable it",
+  needs_deployment: "no deployment yet",
+};
+
+/**
+ * The middle column: which deployment serves this model, and what it is still
+ * waiting for. Both, when both apply — a deployment that exists but has no key
+ * behind it yet is exactly the state the page is there to explain.
+ */
+function modelMeta(model: ModelRow): string {
+  const parts = [
+    ...(model.deployment === null
+      ? []
+      : [`deployment <span class="mono">${escape(model.deployment)}</span>`]),
+    ...(model.reach === "ready"
+      ? []
+      : [`<span class="waiting">${WAITING_FOR[model.reach]}</span>`]),
+  ];
+  if (parts.length === 0) return "";
+  return `<span class="model-meta">${parts.join('<span class="dot"> · </span>')}</span>`;
+}
+
+function modelRow(model: ModelRow): string {
+  return [
+    `<li class="model${model.reach === "ready" ? "" : " model-waiting"}">`,
+    '<span class="model-main">',
+    `<span class="model-name">${escape(model.name)}</span>`,
+    `<span class="model-good">${escape(goodForLine(model.goodFor))}</span>`,
+    "</span>",
+    modelMeta(model),
+    modelPrice(model),
+    "</li>",
+  ].join("\n");
+}
+
+function modelList(provider: ProviderView): string {
+  if (provider.models.length === 0) {
+    return '<p class="models-empty">No curated model reaches this provider yet.</p>';
+  }
+  return [
+    '<p class="models-head">Models it can serve <span class="model-price-head">per image</span></p>',
+    '<ul class="models">',
+    ...provider.models.map(modelRow),
+    "</ul>",
+  ].join("\n");
 }
 
 function form(provider: ProviderView, csrf: string): string {
@@ -205,15 +324,67 @@ function providerCard(provider: ProviderView, view: DashboardView): string {
       ? ""
       : `<p class="muted">${why}</p>`;
 
+  const chip = keyChip(provider);
+
   return [
     '<section class="provider">',
-    '<h3 class="provider-head">',
-    `<span class="name">${escape(provider.id)}</span>`,
+    '<div class="provider-head">',
+    `<h3 class="provider-name">${escape(provider.id)}</h3>`,
     `<span class="status ${provider.status}">${statusLabel(provider.status)}</span>`,
-    "</h3>",
+    ...(chip === null ? [] : [`<span class="key-chip">${chip}</span>`]),
+    "</div>",
     `<p class="source">${source}</p>`,
-    ...(body === "" ? [] : [body]),
+    modelList(provider),
+    ...(body === "" ? [] : [`<div class="provider-act">${body}</div>`]),
     "</section>",
+  ].join("\n");
+}
+
+function pickRow(pick: UseCasePick): string {
+  const now =
+    pick.now === null
+      ? '<span class="pick-model none">nothing reachable yet</span>'
+      : [
+          `<span class="pick-model">${escape(pick.now.model)}</span>`,
+          `<span class="pick-via">via ${escape(pick.now.provider)}</span>`,
+        ].join("\n");
+
+  const overall =
+    pick.overall === null
+      ? []
+      : [
+          `<span class="pick-alt">Best overall: ${escape(pick.overall.model)} — add ${escape(pick.overall.provider)}</span>`,
+        ];
+
+  return [
+    '<li class="pick">',
+    `<span class="pick-case">${escape(USE_CASE_LABELS[pick.useCase])}</span>`,
+    now,
+    ...overall,
+    "</li>",
+  ].join("\n");
+}
+
+function rail(view: DashboardView): string {
+  const anythingReachable = view.picks.some((pick) => pick.now !== null);
+
+  return [
+    '<aside class="rail">',
+    '<section class="panel">',
+    "<h2>Which model for what?</h2>",
+    anythingReachable
+      ? '<p class="panel-lede">What the server would choose today, per kind of picture.</p>'
+      : '<p class="panel-lede">Nothing is reachable yet. Save one key and this fills itself in — here is what each kind of picture is waiting for.</p>',
+    '<ul class="picks">',
+    ...view.picks.map(pickRow),
+    "</ul>",
+    "</section>",
+    '<section class="panel">',
+    "<h2>Point a client here</h2>",
+    `<p class="panel-lede">Any MCP client, at <a class="mono" href="${MCP_PATH}">${MCP_PATH}</a> on this host.</p>`,
+    `<p class="links"><a href="${DOCS_URL}">Read the documentation</a></p>`,
+    "</section>",
+    "</aside>",
   ].join("\n");
 }
 
@@ -243,16 +414,19 @@ export function dashboardPage(view: DashboardView): string {
       "</header>",
       ...flash,
       '<section class="intro">',
-      "<h2>Providers</h2>",
+      "<h1>Providers</h1>",
       '<p class="lede">A key you save here is written straight to your Key Vault. It is never shown back to you, in any form — not the last four characters, not its length. The server picks it up <strong>within a minute</strong>: this replica sees it immediately, and any other replica when its cache expires.</p>',
       ...vaultNote,
       "</section>",
-      '<div class="cards">',
+      '<div class="layout">',
+      '<div class="column">',
       ...view.providers.map((provider) => providerCard(provider, view)),
+      "</div>",
+      rail(view),
       "</div>",
       '<footer class="foot">',
       '<p class="muted">Budgets, spend and a gallery of everything generated are coming here.</p>',
-      `<p class="links"><a href="${MCP_PATH}">The MCP endpoint</a><span class="dot" aria-hidden="true">·</span><a href="${DOCS_URL}">Documentation</a></p>`,
+      `<p class="muted"><span class="approx">~</span> marks an indicative price — derived or unpublished, so confirm it with the provider. Knowledge updated ${escape(view.knowledgeUpdated)}.</p>`,
       "</footer>",
     ].join("\n"),
   );
@@ -262,11 +436,13 @@ export function dashboardPage(view: DashboardView): string {
 export const STYLESHEET = `:root {
   color-scheme: dark light;
   --bg: #0b1020;
-  --glow-one: rgba(109, 90, 224, 0.34);
-  --glow-two: rgba(245, 160, 90, 0.14);
-  --panel: rgba(255, 255, 255, 0.05);
+  --glow-one: rgba(109, 90, 224, 0.22);
+  --glow-two: rgba(245, 160, 90, 0.09);
+  --panel: rgba(255, 255, 255, 0.045);
   --panel-strong: rgba(255, 255, 255, 0.07);
-  --line: rgba(255, 255, 255, 0.11);
+  --panel-hover: rgba(255, 255, 255, 0.065);
+  --line: rgba(255, 255, 255, 0.1);
+  --line-soft: rgba(255, 255, 255, 0.055);
   --ink: #eef1f8;
   --muted: #a5aec6;
   --accent: #ff9d4d;
@@ -280,16 +456,34 @@ export const STYLESHEET = `:root {
   --warn-soft: rgba(255, 201, 120, 0.13);
   --bad: #ff9c95;
   --bad-soft: rgba(255, 156, 149, 0.13);
+  --shadow: 0 1rem 2.4rem rgba(4, 7, 18, 0.3);
+
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+  --s7: 3rem;
+
+  --t-display: 1.7rem;
+  --t-head: 1.02rem;
+  --t-body: 0.95rem;
+  --t-small: 0.82rem;
+
   --radius: 14px;
+  --radius-sm: 9px;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #f6f4f1;
-    --glow-one: rgba(109, 90, 224, 0.16);
-    --glow-two: rgba(245, 160, 90, 0.18);
-    --panel: rgba(255, 255, 255, 0.86);
+    --glow-one: rgba(109, 90, 224, 0.11);
+    --glow-two: rgba(245, 160, 90, 0.12);
+    --panel: rgba(255, 255, 255, 0.9);
     --panel-strong: #ffffff;
-    --line: rgba(27, 32, 51, 0.14);
+    --panel-hover: #ffffff;
+    --line: rgba(27, 32, 51, 0.13);
+    --line-soft: rgba(27, 32, 51, 0.07);
     --ink: #1b2033;
     --muted: #5c6480;
     --accent: #c2510d;
@@ -303,6 +497,7 @@ export const STYLESHEET = `:root {
     --warn-soft: rgba(138, 90, 6, 0.1);
     --bad: #a32118;
     --bad-soft: rgba(163, 33, 24, 0.1);
+    --shadow: 0 0.6rem 1.6rem rgba(27, 32, 51, 0.07);
   }
 }
 * { box-sizing: border-box; }
@@ -311,18 +506,18 @@ body {
   min-height: 100vh;
   background-color: var(--bg);
   background-image:
-    radial-gradient(58rem 30rem at 8% -12%, var(--glow-one), transparent 62%),
-    radial-gradient(46rem 26rem at 104% 2%, var(--glow-two), transparent 58%);
+    radial-gradient(50rem 26rem at 12% -18%, var(--glow-one), transparent 64%),
+    radial-gradient(40rem 22rem at 100% -4%, var(--glow-two), transparent 60%);
   background-repeat: no-repeat;
   color: var(--ink);
-  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--t-body)/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 main {
   width: 100%;
-  max-width: 46rem;
+  max-width: 69rem;
   margin: 0 auto;
-  padding: 2.5rem 1.25rem 4rem;
+  padding: var(--s6) var(--s5) var(--s7);
 }
 body.centred main {
   max-width: 34rem;
@@ -330,32 +525,37 @@ body.centred main {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding-block: 3rem;
+  padding-block: var(--s7);
 }
 h1 {
-  font-size: 1.75rem;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
-  margin: 0.9rem 0 0;
+  font-size: var(--t-display);
+  line-height: 1.18;
+  letter-spacing: -0.022em;
+  font-weight: 640;
+  margin: var(--s3) 0 0;
   text-wrap: balance;
 }
 h2 {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-  margin: 0 0 0.6rem;
+  font-size: var(--t-head);
+  font-weight: 640;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--s2);
 }
-h3 { font-size: 1rem; margin: 0 0 0.35rem; }
-p { margin: 0.6rem 0; }
+h3 { font-size: var(--t-head); font-weight: 640; margin: 0; }
+p { margin: var(--s2) 0; }
 a { color: var(--link); text-underline-offset: 0.2em; }
-strong { color: var(--ink); }
-.lede { color: var(--muted); font-size: 0.97rem; }
-.muted { color: var(--muted); font-size: 0.9rem; }
+a:hover { color: var(--ink); }
+strong { color: var(--ink); font-weight: 620; }
+.mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+.lede { color: var(--muted); font-size: var(--t-body); max-width: 46rem; }
+.muted { color: var(--muted); font-size: var(--t-small); }
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: var(--s2);
   color: inherit;
   text-decoration: none;
   font-weight: 620;
@@ -371,37 +571,62 @@ strong { color: var(--ink); }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1.9rem 1.7rem;
-  box-shadow: 0 1.4rem 3rem rgba(4, 7, 18, 0.28);
+  padding: var(--s6) var(--s5);
+  box-shadow: var(--shadow);
 }
-.hero .actions { margin-top: 1.4rem; }
+.hero .actions { margin-top: var(--s5); }
 .hero .muted { margin-bottom: 0; }
 .bar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 1rem;
+  gap: var(--s4);
   flex-wrap: wrap;
-  padding-bottom: 1.4rem;
+  padding-bottom: var(--s4);
   border-bottom: 1px solid var(--line);
 }
 .who { flex-wrap: wrap; justify-content: flex-end; }
-.intro { margin: 1.8rem 0 1.4rem; }
-.cards { display: grid; gap: 1rem; }
-.provider {
+.intro { margin: var(--s6) 0 var(--s5); }
+.layout { display: grid; gap: var(--s5); grid-template-areas: "rail" "main"; }
+.column { grid-area: main; display: grid; gap: var(--s4); align-content: start; }
+.rail { grid-area: rail; display: grid; gap: var(--s4); align-content: start; }
+@media (min-width: 62rem) {
+  .layout {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-areas: "main rail";
+    align-items: start;
+  }
+  .rail { position: sticky; top: var(--s5); }
+}
+.provider, .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1.1rem 1.2rem 1.2rem;
+  padding: var(--s4) var(--s5) var(--s5);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
+.provider:hover { border-color: var(--line); background: var(--panel-hover); }
+.panel { padding: var(--s4); }
+.panel-lede { color: var(--muted); font-size: var(--t-small); margin: 0 0 var(--s3); }
 .provider-head {
   display: flex;
-  gap: 0.6rem;
+  gap: var(--s2);
   align-items: center;
   flex-wrap: wrap;
+  padding-bottom: var(--s2);
 }
-.name { font-variant-ligatures: none; }
-.source { color: var(--muted); font-size: 0.92rem; margin: 0 0 0.2rem; }
+.provider-name { font-variant-ligatures: none; margin-right: var(--s1); }
+.key-chip {
+  font-size: var(--t-small);
+  color: var(--muted);
+  margin-left: auto;
+}
+.source {
+  color: var(--muted);
+  font-size: var(--t-small);
+  margin: 0 0 var(--s4);
+  max-width: 44rem;
+}
 .status {
   font-size: 0.68rem;
   font-weight: 700;
@@ -411,6 +636,7 @@ strong { color: var(--ink); }
   border-radius: 999px;
   border: 1px solid var(--line);
   color: var(--muted);
+  white-space: nowrap;
 }
 .status.ready {
   color: var(--good);
@@ -422,13 +648,85 @@ strong { color: var(--ink); }
   border-color: var(--warn);
   background: var(--warn-soft);
 }
-form { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-.keyform { margin-top: 0.9rem; }
-.inline { margin: 0; }
-.keyform + .inline { margin-top: 0.6rem; }
+.models-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  margin: 0;
+  padding-bottom: var(--s1);
+  border-bottom: 1px solid var(--line);
+  font-size: 0.7rem;
+  font-weight: 640;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.models-empty { color: var(--muted); font-size: var(--t-small); margin: 0; }
+.models { list-style: none; margin: 0; padding: 0; }
+.model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--s3);
+  align-items: baseline;
+  padding: var(--s2) var(--s1);
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+.model:last-child { border-bottom: 0; }
+.model:hover { background: var(--panel-strong); }
+.model-main {
+  grid-column: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.model-name { font-weight: 560; }
+.model-good { color: var(--muted); font-size: var(--t-small); }
+.model-meta {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: var(--t-small);
+  white-space: nowrap;
+}
+.model-meta .waiting { color: var(--warn); }
+.dot { opacity: 0.5; }
+.model-price, .model-price-head {
+  font-variant-numeric: tabular-nums;
+  min-width: 4.6rem;
+  text-align: right;
+  white-space: nowrap;
+}
+.model-price { grid-column: 3; font-size: var(--t-small); }
+.model-price-head { letter-spacing: 0.1em; }
+.model-waiting .model-name, .model-waiting .model-price { opacity: 0.72; }
+.approx { color: var(--muted); text-decoration: none; border-bottom: 0; cursor: help; }
+.provider-act { margin-top: var(--s4); }
+.picks { list-style: none; margin: 0; padding: 0; }
+.pick {
+  display: grid;
+  gap: 0.1rem;
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--line-soft);
+}
+.pick:first-child { border-top: 0; padding-top: 0; }
+.pick-case {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+.pick-model { font-weight: 560; }
+.pick-model.none { font-weight: 400; color: var(--muted); }
+.pick-via { color: var(--muted); font-size: var(--t-small); }
+.pick-alt { color: var(--warn); font-size: var(--t-small); }
+form { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin: 0; }
+.keyform + .inline { margin-top: var(--s2); }
 label {
   flex-basis: 100%;
-  font-size: 0.8rem;
+  font-size: var(--t-small);
   font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--muted);
@@ -437,17 +735,19 @@ label {
 input[type="password"] {
   flex: 1 1 15rem;
   min-width: 0;
-  padding: 0.62rem 0.75rem;
+  padding: 0.6rem var(--s3);
   border: 1px solid var(--line);
-  border-radius: 0.6rem;
+  border-radius: var(--radius-sm);
   background: var(--field);
   color: inherit;
   font: inherit;
+  transition: border-color 0.15s ease;
 }
+input[type="password"]:hover { border-color: var(--muted); }
 input[type="password"]::placeholder { color: var(--muted); }
 button, .button {
-  padding: 0.62rem 1.1rem;
-  border-radius: 0.6rem;
+  padding: 0.6rem var(--s4);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background-image: linear-gradient(180deg, var(--accent-high), var(--accent));
   color: var(--accent-ink);
@@ -467,42 +767,49 @@ button.secondary {
   color: var(--ink);
   font-weight: 550;
 }
+button.secondary:hover { border-color: var(--muted); filter: none; }
 :focus-visible {
   outline: 2px solid var(--accent-high);
   outline-offset: 2px;
-  border-radius: 0.4rem;
+  border-radius: var(--radius-sm);
 }
 .flash {
-  margin: 1.4rem 0 0;
-  padding: 0.8rem 1rem;
-  border-radius: 0.7rem;
+  margin: var(--s5) 0 0;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--good);
   border-left-width: 4px;
   background: var(--good-soft);
   color: var(--ink);
-  font-size: 0.95rem;
+  font-size: var(--t-body);
 }
 .flash.error { border-color: var(--bad); background: var(--bad-soft); }
 .note {
   border-left: 3px solid var(--line);
-  padding-left: 0.9rem;
+  padding-left: var(--s3);
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: var(--t-small);
 }
 .foot {
-  margin-top: 2.4rem;
-  padding-top: 1.2rem;
+  margin-top: var(--s6);
+  padding-top: var(--s4);
   border-top: 1px solid var(--line);
 }
-.foot p { margin: 0.35rem 0; }
-.links { font-size: 0.9rem; }
-.dot { padding: 0 0.5rem; color: var(--muted); }
-@media (max-width: 30rem) {
-  h1 { font-size: 1.5rem; }
-  .card { padding: 1.5rem 1.2rem; }
+.foot p { margin: var(--s1) 0; }
+.links { font-size: var(--t-small); margin: 0; }
+@media (max-width: 34rem) {
+  main { padding-inline: var(--s4); }
+  h1 { font-size: 1.45rem; }
+  .card { padding: var(--s5) var(--s4); }
+  .provider { padding: var(--s4); }
+  .model { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--s1); }
+  .model-main { grid-column: 1; grid-row: 1; }
+  .model-price { grid-column: 2; grid-row: 1; }
+  .model-meta { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
   input[type="password"] { flex-basis: 100%; }
+  .key-chip { margin-left: 0; flex-basis: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
-  button, .button { transition: none; }
+  button, .button, .provider, input[type="password"] { transition: none; }
 }
 `;

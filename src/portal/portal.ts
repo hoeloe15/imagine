@@ -21,12 +21,20 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Config } from "../core/config-schema.js";
+import type { Config, DeploymentConfig } from "../core/config-schema.js";
+import {
+  loadBundledModelKnowledge,
+  modelsAvailableVia,
+  rankModelsForUseCase,
+  type ModelKnowledge,
+  type ModelStrengths,
+} from "../core/knowledge.js";
 import {
   secretNameFor,
   type SecretResolver,
   type WritableSecretStore,
 } from "../core/secrets.js";
+import { USE_CASES, type UseCase } from "../core/types.js";
 import type { AuthSettings, Authenticator, Authoriser } from "../transport/auth.js";
 import {
   auditRecord,
@@ -50,8 +58,11 @@ import {
   loginPage,
   messagePage,
   STYLESHEET,
+  type ModelReach,
+  type ModelRow,
   type ProviderStatus,
   type ProviderView,
+  type UseCasePick,
 } from "./pages.js";
 import {
   clearedCookie,
@@ -89,6 +100,12 @@ export interface PortalOptions {
   config: Config;
   secrets: SecretResolver;
   auth: AuthSettings;
+  /**
+   * The curated model catalogue the dashboard reads its model lists, prices and
+   * per-use-case picks from. Defaults to the bundled `data/models.json`, which
+   * is what a server built without the config loader would use anyway.
+   */
+  knowledge?: ModelKnowledge;
   /** The vault, when one is configured. Without it no key can be saved. */
   vault?: WritableSecretStore;
   /** The same authenticator `/mcp` uses, for the token the exchange returns. */
@@ -120,6 +137,7 @@ export function createPortal(options: PortalOptions): PathHandler {
   const audit = options.audit ?? createAuditLog({ costLog: config.logging.cost_log });
   const clock = options.now ?? (() => new Date());
   const seconds = (): number => Math.floor(clock().getTime() / 1000);
+  const knowledge = options.knowledge ?? loadBundledModelKnowledge();
 
   function providerIds(): string[] {
     return Object.keys(config.providers);
@@ -127,6 +145,76 @@ export function createPortal(options: PortalOptions): PathHandler {
 
   async function providerViews(): Promise<ProviderView[]> {
     return Promise.all(providerIds().map((id) => providerView(id)));
+  }
+
+  /**
+   * Every curated model this provider is listed as able to serve, with the
+   * reason it is not reachable yet when it is not. A provider whose config names
+   * `deployments` can only serve what that map has a key for — that is what
+   * makes an Azure resource's real menu smaller than the catalogue.
+   */
+  function modelRows(id: string, unlessReachable: ModelReach): ModelRow[] {
+    const deployments = config.providers[id]?.deployments;
+
+    return modelsAvailableVia(knowledge, { providers: [id] }).map(({ model, via }) => {
+      const deployment = deploymentName(deployments?.[via.model_ref]);
+      const reach: ModelReach =
+        deployments !== undefined && deployment === null
+          ? "needs_deployment"
+          : unlessReachable;
+
+      return {
+        id: model.id,
+        name: model.display_name,
+        goodFor: bestUseCases(model.strengths),
+        perImageUsd: model.price.per_image_usd,
+        indicativePrice: model.price.confidence === "indicative",
+        deployment,
+        reach,
+      };
+    });
+  }
+
+  /**
+   * `recommend_model`'s answer per use case, drawn with the same ranking
+   * function so the page cannot drift from the tool: the best model actually
+   * reachable now, and the best one ignoring readiness when that is a different
+   * model — which is what turns "no key yet" into a reason to add one.
+   */
+  function picks(providers: readonly ProviderView[]): UseCasePick[] {
+    const reachable = new Map<string, string>();
+    for (const provider of providers) {
+      for (const model of provider.models) {
+        if (model.reach === "ready" && !reachable.has(model.id)) {
+          reachable.set(model.id, provider.id);
+        }
+      }
+    }
+
+    // Only providers this installation is configured for: a model nothing here
+    // could ever route to is not a reason to go and add a key.
+    return USE_CASES.map((useCase) => {
+      const ranked = rankModelsForUseCase(knowledge, useCase, {
+        providers: providers.map((provider) => provider.id),
+      });
+      const best = ranked.find((entry) => reachable.has(entry.model.id));
+      const overall = ranked[0];
+
+      return {
+        useCase,
+        now:
+          best === undefined
+            ? null
+            : {
+                model: best.model.display_name,
+                provider: reachable.get(best.model.id) ?? best.via.provider,
+              },
+        overall:
+          overall === undefined || overall.model.id === best?.model.id
+            ? null
+            : { model: overall.model.display_name, provider: overall.via.provider },
+      };
+    });
   }
 
   async function providerView(id: string): Promise<ProviderView> {
@@ -143,6 +231,7 @@ export function createPortal(options: PortalOptions): PathHandler {
         envVar,
         writable: false,
         note: "Disabled in configuration. Enable it there before a key here would do anything.",
+        models: modelRows(id, "needs_enabling"),
       };
     }
 
@@ -155,6 +244,7 @@ export function createPortal(options: PortalOptions): PathHandler {
         envVar,
         writable: false,
         note: "Authenticates with the deployment's own managed identity, so there is no key to set.",
+        models: modelRows(id, "ready"),
       };
     }
 
@@ -171,6 +261,7 @@ export function createPortal(options: PortalOptions): PathHandler {
       envVar,
       writable,
       note: lookup.note ?? null,
+      models: modelRows(id, status === "ready" ? "ready" : "needs_key"),
     };
   }
 
@@ -204,6 +295,8 @@ export function createPortal(options: PortalOptions): PathHandler {
         subject: current.subject,
         csrf: csrfToken(key, current),
         providers,
+        picks: picks(providers),
+        knowledgeUpdated: knowledge.updated,
         flash: flashFor(query, providers),
         vaultNote: vaultNote(),
       }),
@@ -768,6 +861,24 @@ export function createPortal(options: PortalOptions): PathHandler {
       res.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
     }
   }
+}
+
+/**
+ * A deployment entry is either the bare name or the object form that also
+ * carries a wire dialect (ADR 0027); either way the name is what the page shows.
+ */
+function deploymentName(value: DeploymentConfig | undefined): string | null {
+  if (value === undefined) return null;
+  return typeof value === "string" ? value : value.deployment;
+}
+
+/**
+ * The use cases a model scores highest on — its "good for", read off the same
+ * strength scores the router ranks by rather than written out a second time.
+ */
+function bestUseCases(strengths: ModelStrengths): UseCase[] {
+  const top = Math.max(...USE_CASES.map((useCase) => strengths[useCase]));
+  return USE_CASES.filter((useCase) => strengths[useCase] === top).slice(0, 3);
 }
 
 /** Non-empty, no whitespace, and bounded. Nothing provider-specific: a prefix
