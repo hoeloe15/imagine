@@ -906,7 +906,10 @@ azd up
 - **Your email address**, written as `email:you@example.com`. Matched against the
   token's verified `email` claim, ignoring case. WorkOS verifies that address for
   social logins, which is why this is offered; it is a convenience, and it is
-  only as good as that verification.
+  only as good as that verification. One catch: the address is only in the token
+  when the chat client asked for it. Mistral does; Claude does not, so with an
+  email-only allowlist Claude is refused with a 403 after a successful login.
+  List your user id as well and both work.
 - **Your WorkOS user id**, which is the sturdier choice: WorkOS dashboard →
   **Users** → your user. It looks like `user_01HBEQKA6K4QJAS93VPE39W1JT`. This is
   the token's `sub`, and it does not change if you ever change your email.

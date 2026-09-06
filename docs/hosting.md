@@ -177,8 +177,10 @@ Some detail worth knowing:
 - **`email:` is a convenience**, because a WorkOS user id is a string nobody can
   recognise and your own address is one you already know. It is only as
   trustworthy as your issuer's email verification; WorkOS verifies the address
-  for social logins, which is why it is offered at all. If you would rather not
-  depend on that, list subjects.
+  for social logins, which is why it is offered at all. It also depends on the
+  client: the `email` claim is only present when the client requested the email
+  scope, and not every chat client does (Mistral does, Claude does not). If you
+  would rather not depend on either, list subjects — or list both forms.
 - **An allowlist without authentication is a startup error**, not a warning.
   There would be no verified identity to compare it against, so it would be a
   security setting that silently does nothing.
