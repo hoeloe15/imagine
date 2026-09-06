@@ -23,7 +23,7 @@ carries. Where a claim is a guess, it says so.
    token* rates. Converting to a per-image number requires a tokens-per-image
    figure Microsoft does not publish; the best available conversion is
    third-party and is flagged as such.
-4. **MAI-Image-2.6 and 2.6-Flash are undocumented.** They are deployable in
+4. **MAI-Image-2.6 and 2.6-Flash are undocumented.** *(Superseded, see addendum.)* They are deployable in
    swedencentral according to the control plane, but they appear in no Learn
    page, no region table, no pricing table and no model card. 2.6-Flash appears
    in *no* public source at all — not even a press release.
@@ -166,7 +166,8 @@ fetch returns `$-` placeholders). Column headers are "Input (Per 1M tokens)",
 | MAI-Image-2.5 Pro Global | Text $5 / Image $8 | N/A | $106 |
 
 **MAI-Image-2.6 and MAI-Image-2.6-Flash are not on the pricing page at all**
-(checked 2026-09-04).
+(checked 2026-09-04). *(Still true of the pricing page on 2026-09-06, but both
+models now have announced rates — superseded, see addendum.)*
 
 Corroborating Microsoft announcements (each states "pricing starts at"):
 
@@ -369,14 +370,14 @@ The Learn troubleshooting table maps errors the way `azure.ts` already does:
 
 Stated plainly, because guessing here is how a curation file starts lying.
 
-1. **Everything specific to MAI-Image-2.6 and 2.6-Flash on Foundry.** No Learn
+1. **Everything specific to MAI-Image-2.6 and 2.6-Flash on Foundry.** *(Superseded, see addendum.)* No Learn
    page, no region table row, no pricing row, no model card PDF, no catalog page
    that renders. The Microsoft AI announcement (10 Aug 2026) says 2.6 is in
    *private preview* on Foundry. The control plane in swedencentral offers both
    (per `az cognitiveservices model list`, 2026-09-04) — so the platform is ahead
    of the documentation, which is normal for a preview, but it means we would be
    deploying a model whose contract is documented only for its predecessor.
-2. **MAI-Image-2.6-Flash has no public existence whatsoever.** Not in any
+2. **MAI-Image-2.6-Flash has no public existence whatsoever.** *(Superseded, see addendum.)* Not in any
    Microsoft announcement, not on Arena, not on the pricing page, not in a
    third-party write-up. Its version stamp (2026-07-31) matching 2.6's is the
    only thing we know about it. Whether it supports edits, how fast it is, what
@@ -582,7 +583,7 @@ string form meaning "openai dialect" so nothing existing breaks. That is an ADR
    adapter is wrong and we find out in production. *Mitigation: deploy
    `MAI-Image-2.5` first, verify the documented contract end to end, and only then
    point the same dialect at 2.6.*
-2. **2.6-Flash is entirely unevidenced.** Curating it means publishing five
+2. **2.6-Flash is entirely unevidenced.** *(Partly superseded, see addendum.)* Curating it means publishing five
    strength scores, a price and a latency that are all extrapolation. A
    recommendation engine that confidently recommends a model nobody has measured
    is worse than one that does not list it. *Mitigation: either omit 2.6-Flash
@@ -613,7 +614,8 @@ string form meaning "openai dialect" so nothing existing breaks. That is an ADR
    future Azure change now has two paths to get right. *Mitigation: the contract
    tests, and keeping the dialect seam as small as possible — URL builder, body
    builder, scope. Nothing else should branch.*
-8. **Preview terms.** MAI image models are public preview (2.5) or private
+8. **Preview terms.** *(Superseded, see addendum: 2.6 and 2.6-Flash are public
+   preview too.)* MAI image models are public preview (2.5) or private
    preview (2.6): no SLA, and Microsoft explicitly does not recommend them for
    production. That is fine for this repo's purposes but should be visible in
    the model notes, not buried here.
@@ -622,6 +624,146 @@ string form meaning "openai dialect" so nothing existing breaks. That is an ADR
    revisiting that makes the file internally inconsistent. *Mitigation: a
    follow-up issue to re-baseline the existing scores against the 2026-09-04
    board; do not quietly change them inside this one.*
+
+---
+
+## Addendum 2026-09-06: official announcement
+
+Two days after the notes above were written, Microsoft announced **MAI-Image-2.6
+and MAI-Image-2.6-Flash in public preview in Microsoft Foundry**. Most of §5's
+unknowns and two of §6(d)'s risks are now answered. The original sections are
+left as they were written; this section is what changed and what it is worth.
+
+Everything below was read on **2026-09-06** unless another date is given.
+
+### What the linked pages now confirm
+
+**The Learn how-to** (`use-foundry-models-mai-image`, `ms.date` **2026-09-04**,
+page `updated_at` **2026-09-04**) — the page that covered only the 2.5 family
+when §1 was written — now documents both new models by name:
+
+- `MAI-Image-2.6` (Preview) and `MAI-Image-2.6-Flash` (Preview), both version
+  **2026-07-31**, both Global Standard, both **text-to-image and image-to-image
+  edits**. That settles §5.2: 2.6-Flash supports edits.
+- **The wire contract is unchanged.** Same host, same `/mai/v1/images/generations`
+  and `/mai/v1/images/edits` paths, still no `api-version` anywhere, still
+  `model` in the body, still `width`/`height`, still the 1,048,576-pixel budget
+  and the 768 minimum per side, still base64 PNG in `data[0].b64_json`, still
+  the `https://cognitiveservices.azure.com/.default` Entra scope. §5.3's worry
+  that 2.6 might have moved the pixel cap is answered: it has not. The adapter
+  built for 2.6 needs no change for Flash.
+- **Two new parameters, both 2.6-only**, and both new since the notes above:
+  - `auto_aspect_ratio` (boolean, both APIs) — the model picks the output aspect
+    ratio from the prompt and any input images. This is the concrete form of the
+    announcement's "greater control over format and resolution".
+  - `web_grounding` (boolean, both APIs) — the model may retrieve current
+    information from Bing Search and use it as context before drawing. Useful
+    for real-world entities, places and events.
+  Neither is exposed by this server today; `generate_image` sends neither.
+- **The quota table now has columns for 2.6 and 2.6-Flash**, and they are
+  identical to the 2.5 family: 2 RPM at tier 1, rising to 12 at tier 6. §4.2's
+  caveat that the table covered only 2.5 is gone, and the number did not change.
+
+**The region availability table**
+(`models-sold-directly-by-azure-region-availability`, `ms.date` **2026-09-03**,
+`updated_at` **2026-09-04**) now lists rows for both, version 2026-07-31, in
+**eastus, westcentralus, westus, swedencentral and westeurope**. §4.1's "no row
+for 2.6 or 2.6-Flash" is superseded. Sweden Central — the owner's region — is
+covered for both.
+
+**The capability page** (`models-sold-directly-by-azure`, `ms.date`
+**2026-09-04**) carries rows for both: input text and image, **output one
+image**, 32,000-token context, no tool calling, PNG out, English only, and the
+same width/height/prompt parameter set. So §1.3's "one image per call, no `n`"
+holds for 2.6-Flash as well — which is why its `fast_bulk` score in
+`data/models.json` is a 4 and not a 5.
+
+**The pricing page**
+(`azure.microsoft.com/…/ai-foundry-models/microsoft/`) **still has no 2.6 or
+2.6-Flash row at all**, and still renders every figure as a `$-` placeholder to
+a plain fetch. §2 is unchanged on that point.
+
+### What the announcement claims
+
+From Microsoft's announcement text of 2026-09-06 (Foundry blog,
+"MAI-Image-2.6 and MAI-Image-2.6-Flash: quality and speed at production scale").
+These are Microsoft's claims about its own models, recorded as such:
+
+- Both are **public preview**, "Foundry Model sold directly by Azure": Entra ID
+  auth, RBAC, key-based access, and prompts and outputs not used for training.
+  This supersedes §3.1's "private preview on Foundry" and §6(d).8.
+- **MAI-Image-2.6** launched at **No. 2 on Arena** text-to-image, "ahead of
+  Google's Nano Banana family and Meta's Muse Image", and on Artificial Analysis
+  at **No. 2 text-to-image and No. 1 image editing**. §3.2 read the Arena board
+  directly on 2026-09-04 and found the same No. 2; the Artificial Analysis
+  editing claim is new and unverified by us.
+- New in 2.6: **multi-reference editing, up to five reference images in a single
+  request**; **web grounding via Bing Search**; greater control over format and
+  resolution.
+- **MAI-Image-2.6-Flash** carries "the same advances" tuned for latency- and
+  cost-sensitive production work. Microsoft's split is explicit: **Flash for
+  exploration, iteration and volume; 2.6 for final assets**. It claims Flash is
+  **more than twice as fast as GPT-Image-2 at its medium setting** and
+  substantially more efficient.
+- Named use cases: marketing and campaign assets with legible headline text,
+  catalogues with consistent lighting, brand and character consistency through
+  reference images, personalisation at scale (Flash), and surgical editing,
+  inpainting and text updates.
+
+**Prices, announced, per 1M tokens** (from the same announcement, read via a
+search index on 2026-09-06 because the blog body renders client-side — treat the
+figures as Microsoft's but re-read them on the pricing page once it catches up):
+
+| Model | Text input | Image input | Image output |
+| --- | --- | --- | --- |
+| MAI-Image-2.6 | $5 | $8 | **$38** |
+| MAI-Image-2.6-Flash | $1.75 | $2.50 | **$19** |
+
+This is better than the proxy §2.2 recommended. Applied to the **1,014 image
+output tokens measured on a real one-megapixel MAI call** (2026-09-04), that is
+**~$0.039 per image for 2.6** and **~$0.019 for Flash** — against the $0.048 and
+$0.020 the 2.5-tier proxy produced. `data/models.json` now carries the derived
+figures, still `confidence: "indicative"`, because a per-token rate times a
+measured token count is not a list price and the token count is ours, not
+Microsoft's. §2.2 stands as the method; only its inputs improved.
+
+### One claim the documentation does not back
+
+The announcement's **multi-reference editing, up to five reference images**, is
+**not in the Learn how-to**. That page's edits API still documents a single
+`image` field, passed as multipart form data, and lists no parameter for extra
+references. Either the docs lag the announcement or the feature reaches Foundry
+by a route the how-to does not describe. **Do not build against five references
+until a request shape is documented or observed.** It is the interesting half of
+issue #63 (`edit_image`) and the reason that issue is worth doing.
+
+### What is still unknown
+
+Of §5, these survive:
+
+- **Tokens per image** as a Microsoft-published figure (§5.4). Ours is measured
+  on one call; whether it varies by size or by model is untested. Both new
+  prices inherit that uncertainty.
+- **Latency** (§5.7). Still no first-party number for any MAI-Image model.
+  Microsoft's "more than 2x faster than GPT-Image-2-Medium" is a claim about
+  Flash relative to another vendor's model, not a figure we can put in a file.
+  `typical_latency_s` for both MAI entries remains an estimate.
+- **Content-filter vocabulary** (§5.9) and whether `n > 1` is silently accepted
+  (§5.8). Untouched by the announcement.
+- Whether 2.6's Arena editing rank and the Artificial Analysis rankings hold up
+  on a board we read ourselves.
+
+And §5.5 (no `api-version`) and §5.6 (the Entra scope) are now settled by
+practice rather than by reading: the dialect has been run live against a real
+2.6 deployment (see the note in `data/models.json` and the ADR).
+
+### Sources for this addendum
+
+- [Deploy and use MAI image models in Microsoft Foundry](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-mai-image) — Microsoft Learn, ms.date 2026-09-04, read 2026-09-06
+- [Region availability for Foundry Models sold by Azure](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability) — Microsoft Learn, ms.date 2026-09-03, read 2026-09-06
+- [Foundry Models sold by Azure](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure) — Microsoft Learn, ms.date 2026-09-04, read 2026-09-06
+- [MAI-Image-2.6 and MAI-Image-2.6-Flash: quality and speed at production scale](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/mai-image-2-6-and-mai-image-2-6-flash-quality-and-speed-at-production-scale/4550970) — Foundry blog, announced 2026-09-06; body renders client-side, figures read via search index 2026-09-06
+- [Foundry Models Pricing — Microsoft models](https://azure.microsoft.com/en-us/pricing/details/ai-foundry-models/microsoft/) — Azure pricing, re-checked 2026-09-06: still no 2.6 rows
 
 ---
 

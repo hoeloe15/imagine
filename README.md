@@ -48,7 +48,9 @@ You need Node 20 or newer. There is nothing to install and nothing to build.
 
 **1. Get a key.** Create one at [openrouter.ai](https://openrouter.ai/keys).
 That is the only credential you need — OpenRouter is enabled out of the box and
-all four curated models are reachable through it.
+four of the six curated models are reachable through it. The other two are
+Microsoft's own MAI-Image models, which live only inside an Azure AI Foundry
+resource; see [docs/configuration.md](docs/configuration.md) if you have one.
 
 **2. Put it in a file** at `~/.imagine/.env`:
 
@@ -218,9 +220,10 @@ with the leaderboards without anyone hard-coding a model name again.
 [`data/models.json`](data/models.json) is the editorial half of the project: for
 each curated model, a 1–5 score per use case, an indicative price per image, a
 typical latency, which providers can serve it, and a `notes` field that says both
-what to pick it for and what *not* to pick it for. Four models are curated today
-— GPT Image 2, Nano Banana (Gemini 3.1 Flash Image), Grok Imagine Image 2.0 and
-FLUX 2 Pro. The scores are editorial judgements, not measurements, and the prices
+what to pick it for and what *not* to pick it for. Six models are curated today
+— GPT Image 2, Nano Banana (Gemini 3.1 Flash Image), Grok Imagine Image 2.0,
+FLUX 2 Pro, MAI-Image 2.6 and MAI-Image 2.6 Flash. The last two are Azure-only.
+The scores are editorial judgements, not measurements, and the prices
 are indicative list prices that change often; both advisory tools return the
 file's own disclaimer alongside their answer, a provider's reported cost always
 beats the number in the file, and the file carries an `updated` date so

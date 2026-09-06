@@ -318,12 +318,23 @@ describe("the generate_image tool", () => {
 describe("the blob sink, end to end", () => {
   const ACCOUNT_URL = "https://mystorage.blob.core.windows.net";
 
+  /**
+   * The signed link can never outlive the delegation key, so these two are
+   * relative to now: a fixed date would quietly turn this suite into a time
+   * bomb that fails on the day the key expires.
+   */
+  function isoOffsetFromNow(hours: number): string {
+    return new Date(Date.now() + hours * 60 * 60 * 1000)
+      .toISOString()
+      .replace(/\.\d+Z$/, "Z");
+  }
+
   const keyXml = [
     "<UserDelegationKey>",
     "<SignedOid>11111111-1111-1111-1111-111111111111</SignedOid>",
     "<SignedTid>22222222-2222-2222-2222-222222222222</SignedTid>",
-    "<SignedStart>2026-09-04T11:55:00Z</SignedStart>",
-    "<SignedExpiry>2026-09-05T12:00:00Z</SignedExpiry>",
+    `<SignedStart>${isoOffsetFromNow(-1)}</SignedStart>`,
+    `<SignedExpiry>${isoOffsetFromNow(24)}</SignedExpiry>`,
     "<SignedService>b</SignedService>",
     "<SignedVersion>2020-12-06</SignedVersion>",
     "<Value>aW1hZ2luZS10ZXN0LWRlbGVnYXRpb24ta2V5</Value>",

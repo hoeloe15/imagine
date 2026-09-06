@@ -64,6 +64,7 @@ describe("bundled data/models.json", () => {
       "grok-imagine-image-2.0",
       "flux-2-pro",
       "mai-image-2.6",
+      "mai-image-2.6-flash",
     ]);
   });
 
@@ -97,21 +98,23 @@ describe("bundled data/models.json", () => {
 
   it("is reachable through OpenRouter for every model OpenRouter carries", () => {
     /**
-     * MAI-Image is the first curated model that exists only inside an Azure
-     * resource: OpenRouter does not resell it, so "everything is reachable
-     * through OpenRouter" stopped being true with issue #59.
+     * MAI-Image is the first curated family that exists only inside an Azure
+     * resource, so "everything is reachable through OpenRouter" stopped being
+     * true with issue #59.
      */
     for (const model of knowledge.models) {
-      if (model.id === "mai-image-2.6") continue;
+      if (model.family === "microsoft") continue;
       expect(availabilityFor(model, { providers: ["openrouter"] })).toBeDefined();
     }
   });
 
-  it("reaches the Azure-only model through Azure and nowhere else", () => {
-    const model = findModel(knowledge, "mai-image-2.6");
+  it("reaches the Azure-only models through Azure and nowhere else", () => {
+    for (const id of ["mai-image-2.6", "mai-image-2.6-flash"]) {
+      const model = findModel(knowledge, id);
 
-    expect(model?.availability.map((entry) => entry.provider)).toEqual(["azure"]);
-    expect(availabilityFor(model!, { providers: ["openrouter"] })).toBeUndefined();
+      expect(model?.availability.map((entry) => entry.provider)).toEqual(["azure"]);
+      expect(availabilityFor(model!, { providers: ["openrouter"] })).toBeUndefined();
+    }
   });
 
   it("matches the shape schema/models.schema.json documents", () => {
@@ -132,7 +135,7 @@ describe("bundled data/models.json", () => {
 
 describe("loadModelKnowledgeFrom", () => {
   it("reads and validates a file from disk", () => {
-    expect(loadModelKnowledgeFrom(bundledModelsPath()).models).toHaveLength(5);
+    expect(loadModelKnowledgeFrom(bundledModelsPath()).models).toHaveLength(6);
   });
 
   it("rejects a missing file", () => {
@@ -215,7 +218,7 @@ describe("queries restricted to configured providers", () => {
       (selection) => selection.model.id,
     );
 
-    expect(ids).toEqual(["gpt-image-2", "mai-image-2.6"]);
+    expect(ids).toEqual(["gpt-image-2", "mai-image-2.6", "mai-image-2.6-flash"]);
   });
 
   it("returns nothing when no provider is configured", () => {
@@ -231,6 +234,7 @@ describe("queries restricted to configured providers", () => {
     expect(
       rankModelsForUseCase(tied, "diagram").map((selection) => selection.model.id),
     ).toEqual([
+      "mai-image-2.6-flash",
       "grok-imagine-image-2.0",
       "gemini-3.1-flash-image",
       "mai-image-2.6",
@@ -246,6 +250,7 @@ describe("queries restricted to configured providers", () => {
       "gpt-image-2",
       "mai-image-2.6",
       "flux-2-pro",
+      "mai-image-2.6-flash",
       "grok-imagine-image-2.0",
       "gemini-3.1-flash-image",
     ]);

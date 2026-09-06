@@ -416,6 +416,27 @@ the first real run, 2026-09-04.)
 Azure AI Foundry. They are usually not the same string, and a mismatch surfaces
 as a 404 that names the deployment it tried.
 
+Microsoft's own MAI-Image models sit in the same resource but speak a different
+API, so their entries take the object form with `"dialect": "mai"`. Both curated
+ones, together with GPT Image 2:
+
+```json
+{
+  "gpt-image-2": "<your-deployment-name>",
+  "mai-image-2.6": { "deployment": "mai-image-2-6", "dialect": "mai" },
+  "mai-image-2.6-flash": {
+    "deployment": "mai-image-2-6-flash",
+    "dialect": "mai"
+  }
+}
+```
+
+Under `"auth": "entra"` the identity needs the **Cognitive Services User** role
+for MAI on top of the **Cognitive Services OpenAI User** role GPT Image 2 needs —
+same resource, second role. See
+[Two kinds of Azure deployment](../configuration.md) and
+[ADR 0027](../adr/0027-the-mai-image-wire-dialect.md).
+
 Then tell the template which resource the identity needs access to. It is
 normally in a different resource group from this deployment, so it is given as a
 full resource id:

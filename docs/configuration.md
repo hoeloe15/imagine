@@ -217,7 +217,11 @@ deployment entry can say which of the two it speaks:
       "endpoint": "https://my-resource.openai.azure.com",
       "deployments": {
         "gpt-image-2": "my-gpt-image-2",
-        "mai-image-2.6": { "deployment": "mai-image-2-6", "dialect": "mai" }
+        "mai-image-2.6": { "deployment": "mai-image-2-6", "dialect": "mai" },
+        "mai-image-2.6-flash": {
+          "deployment": "mai-image-2-6-flash",
+          "dialect": "mai"
+        }
       }
     }
   }
@@ -227,7 +231,9 @@ deployment entry can say which of the two it speaks:
 - **A plain string is the deployment name and means `"dialect": "openai"`** — the
   GPT Image 2 shape. Every config written before this existed keeps working
   exactly as it did.
-- **`"dialect": "mai"`** is for the MAI-Image models. The server derives the host
+- **`"dialect": "mai"`** is for the MAI-Image models — both curated ones, 2.6 and
+  2.6-Flash, speak it, and one resource can serve both at once. The server
+  derives the host
   it needs from the endpoint you already configured, swapping
   `my-resource.openai.azure.com` for `my-resource.services.ai.azure.com`. Set
   `"endpoint"` on the entry only if your resource does not follow that pattern.
