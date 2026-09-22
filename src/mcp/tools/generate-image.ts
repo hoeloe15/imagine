@@ -96,7 +96,7 @@ export const generateImageOutputSchema = {
     .string()
     .optional()
     .describe(
-      "A link to the image that needs no credentials, present only when the sink can hand one out. Render or download this; never expect image bytes in this result.",
+      "A link to the full-size image that needs no credentials, present only when the sink can hand one out. Safe to share until url_expires_at.",
     ),
   url_expires_at: z
     .string()
@@ -231,8 +231,26 @@ function fileNameFrom(location: string): string {
   return segment === "" ? "image" : segment;
 }
 
-/** Everything the rendering hint needs, gathered once the image is stored. */
-interface RenderableImage {
+/**
+ * The most image data that goes back inline, measured as the base64 text that
+ * actually travels. Claude refuses a single image over 5 MB and it is not
+ * certain whether that counts raw or encoded bytes, so the cap is set on the
+ * encoded size with room to spare. See ADR 0029.
+ */
+export const INLINE_IMAGE_MAX_BASE64_LENGTH = 4 * 1024 * 1024;
+
+function base64Length(byteCount: number): number {
+  return 4 * Math.ceil(byteCount / 3);
+}
+
+/** The picture exactly as the provider handed it over. */
+export interface GeneratedImage {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
+/** Everything a link-based rendering needs, gathered once the image is stored. */
+export interface RenderableLink {
   url: string;
   url_expires_at?: string;
   alt: string;
@@ -240,44 +258,105 @@ interface RenderableImage {
   mimeType: string;
 }
 
+/** How the picture reaches the chat, beyond the JSON envelope. */
+export interface Delivery {
+  image: GeneratedImage;
+  /** `output.inline_image`: whether the bytes may come back as an image item. */
+  inlineImage: boolean;
+  /** Present when the sink handed out a link. */
+  link?: RenderableLink;
+}
+
+type InlineOutcome = "shown" | "switched_off" | "too_large";
+
+function inlineOutcome(delivery: Delivery): InlineOutcome {
+  if (!delivery.inlineImage) return "switched_off";
+  return base64Length(delivery.image.bytes.byteLength) <= INLINE_IMAGE_MAX_BASE64_LENGTH
+    ? "shown"
+    : "too_large";
+}
+
+const DO_NOT_REENCODE =
+  "Do not fetch, download or re-encode the bytes, and do not state any other validity period.";
+
+const TOO_LARGE_INLINE =
+  "The full-size image is larger than what chat clients accept inline, so it is not in this result";
+
+function renderingHint(
+  outcome: InlineOutcome,
+  path: string,
+  link: RenderableLink | undefined,
+): string | undefined {
+  const validity =
+    link?.url_expires_at === undefined
+      ? ""
+      : ` (link valid until ${link.url_expires_at})`;
+
+  if (outcome === "shown") {
+    const already =
+      "The picture is already in this result as an image, which the chat shows to the user; do not also write it as a markdown image.";
+    return link === undefined
+      ? `${already} The file is at ${path}.`
+      : `${already} The full-size image is also at ${link.url}${validity}, if the user wants to open or share it. ${DO_NOT_REENCODE}`;
+  }
+
+  const markdown =
+    link === undefined
+      ? undefined
+      : `Show the image to the user with markdown: ![${link.alt}](${link.url})${validity}.`;
+
+  if (outcome === "too_large") {
+    return markdown === undefined
+      ? `${TOO_LARGE_INLINE}; open the file at ${path}.`
+      : `${markdown} ${TOO_LARGE_INLINE}; open the link. ${DO_NOT_REENCODE}`;
+  }
+
+  return markdown === undefined ? undefined : `${markdown} ${DO_NOT_REENCODE}`;
+}
+
 /**
- * The success envelope, plus — when there is a link — the two things a hosted
- * chat client needs to actually show the picture.
+ * The success envelope, plus what a chat client needs to actually show the
+ * picture.
  *
- * Observed live: a client handed only `url` in JSON renders it as a bare link
- * and tells the user it cannot display images. So the result also says, in
- * words the model reads, to write a markdown image, and repeats the link as a
- * `resource_link` content item for clients that render those natively.
+ * The picture itself travels as an MCP `image` content item: clients that can
+ * show images render it in the conversation, and the model sees it as an
+ * image, not as text. A link on its own was observed to fail twice — printed as
+ * a bare link, and in claude.ai as a "Show Image" box the user has to click. See
+ * ADR 0029, which amends ADR 0024.
+ *
+ * The link stays, as a text hint and a `resource_link`: it is the full-size
+ * file, it can be shared, and it is all a client without inline images gets.
  *
  * The first content item stays pure JSON: that is the envelope every client and
- * test parses, so the hint is a second text item rather than a suffix on it.
+ * test parses, so everything else comes after it.
  */
-function succeeded(
+export function succeeded(
   payload: GenerateImageSuccess,
-  renderable?: RenderableImage,
+  delivery: Delivery,
 ): CallToolResult {
   const content: CallToolResult["content"] = [
     { type: "text", text: JSON.stringify(payload, null, 2) },
   ];
 
-  if (renderable !== undefined) {
-    const validity =
-      renderable.url_expires_at === undefined
-        ? ""
-        : ` (link valid until ${renderable.url_expires_at})`;
+  const outcome = inlineOutcome(delivery);
+  if (outcome === "shown") {
     content.push({
-      type: "text",
-      text:
-        `Show the image to the user with markdown: ` +
-        `![${renderable.alt}](${renderable.url})${validity}. ` +
-        `Do not fetch, download or re-encode the bytes, and do not state any other validity period.`,
+      type: "image",
+      data: Buffer.from(delivery.image.bytes).toString("base64"),
+      mimeType: delivery.image.mimeType,
     });
+  }
+
+  const hint = renderingHint(outcome, payload.path, delivery.link);
+  if (hint !== undefined) content.push({ type: "text", text: hint });
+
+  if (delivery.link !== undefined) {
     content.push({
       type: "resource_link",
-      uri: renderable.url,
-      name: renderable.filename,
-      mimeType: renderable.mimeType,
-      description: renderable.alt,
+      uri: delivery.link.url,
+      name: delivery.link.filename,
+      mimeType: delivery.link.mimeType,
+      description: delivery.link.alt,
     });
   }
 
@@ -357,17 +436,23 @@ export async function generateImage(
         },
         ...(warning === undefined ? {} : { budget_warning: warning }),
       },
-      written.url === undefined
-        ? undefined
-        : {
-            url: written.url,
-            ...(written.url_expires_at === undefined
-              ? {}
-              : { url_expires_at: written.url_expires_at }),
-            alt: altTextFromPrompt(request.prompt),
-            filename: fileNameFrom(written.path),
-            mimeType: outcome.result.mime_type,
-          },
+      {
+        image: { bytes: outcome.result.bytes, mimeType: outcome.result.mime_type },
+        inlineImage: config.output.inline_image,
+        ...(written.url === undefined
+          ? {}
+          : {
+              link: {
+                url: written.url,
+                ...(written.url_expires_at === undefined
+                  ? {}
+                  : { url_expires_at: written.url_expires_at }),
+                alt: altTextFromPrompt(request.prompt),
+                filename: fileNameFrom(written.path),
+                mimeType: outcome.result.mime_type,
+              },
+            }),
+      },
     );
   } catch (cause) {
     const failure = asImagineError(cause);
@@ -420,12 +505,12 @@ export function registerGenerateImage(
       title: "Generate an image",
       description:
         "Generate an image, store it and return where it went plus what it cost. " +
-        "The image bytes never travel back to the client: put the returned path into your " +
-        "document, or read the file yourself if you need the pixels. When the server stores " +
-        "images in the cloud the result also carries url, a link anyone can open — show that. " +
-        "When url is present, present it to the user as a markdown image — ![alt](url) — so they " +
-        "see the picture rather than a link, say it is valid until url_expires_at and nothing else, " +
-        "and never fetch, download or re-encode the bytes yourself.",
+        "The picture normally comes back in the result as an image, which the chat shows to the " +
+        "user directly; when it does, do not also repeat it as a markdown image. The result also " +
+        "carries path, where the file was stored, and — when the server stores images in the " +
+        "cloud — url, a link to the full-size image anyone can open. When no image came back and " +
+        "url is present, show url as a markdown image — ![alt](url). Say a link is valid until " +
+        "url_expires_at and nothing else, and never fetch, download or re-encode the bytes yourself.",
       inputSchema: generateImageInputSchema,
       outputSchema: generateImageOutputSchema,
       annotations: { readOnlyHint: false, openWorldHint: true },

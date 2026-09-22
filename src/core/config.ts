@@ -49,13 +49,14 @@ export const CONFIG_ENV_VAR = "IMAGINE_CONFIG_JSON";
  * because the values only exist once the storage account has been created.
  * They are a convenience over {@link CONFIG_ENV_VAR}, never a replacement:
  * anything `IMAGINE_CONFIG_JSON` says about `output` wins over these. See
- * ADR 0024.
+ * ADR 0024, and ADR 0029 for the inline-image switch.
  */
 export const OUTPUT_ENV_VARS = {
   sink: "IMAGINE_OUTPUT_SINK",
   accountUrl: "IMAGINE_OUTPUT_BLOB_ACCOUNT_URL",
   container: "IMAGINE_OUTPUT_BLOB_CONTAINER",
   urlTtlHours: "IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS",
+  inlineImage: "IMAGINE_OUTPUT_INLINE_IMAGE",
 } as const;
 
 export const OUTPUT_ENV_ORIGIN = "the IMAGINE_OUTPUT_* environment variables";
@@ -234,12 +235,14 @@ function outputFragment(env: Env): Record<string, unknown> | null {
   const accountUrl = trimmed(env[OUTPUT_ENV_VARS.accountUrl]);
   const container = trimmed(env[OUTPUT_ENV_VARS.container]);
   const ttl = trimmed(env[OUTPUT_ENV_VARS.urlTtlHours]);
+  const inlineImage = trimmed(env[OUTPUT_ENV_VARS.inlineImage])?.toLowerCase();
 
   if (
     sink === undefined &&
     accountUrl === undefined &&
     container === undefined &&
-    ttl === undefined
+    ttl === undefined &&
+    inlineImage === undefined
   ) {
     return null;
   }
@@ -247,6 +250,12 @@ function outputFragment(env: Env): Record<string, unknown> | null {
   if (ttl !== undefined && !/^\d+$/.test(ttl)) {
     throw configError(
       `${OUTPUT_ENV_VARS.urlTtlHours} is "${ttl}", which is not a whole number of hours.`,
+    );
+  }
+
+  if (inlineImage !== undefined && inlineImage !== "true" && inlineImage !== "false") {
+    throw configError(
+      `${OUTPUT_ENV_VARS.inlineImage} is "${inlineImage}", which is neither "true" nor "false".`,
     );
   }
 
@@ -259,6 +268,7 @@ function outputFragment(env: Env): Record<string, unknown> | null {
   const output = {
     ...(sink === undefined ? {} : { sink }),
     ...(Object.keys(blob).length === 0 ? {} : { blob }),
+    ...(inlineImage === undefined ? {} : { inline_image: inlineImage === "true" }),
   };
 
   return parseFragment(OUTPUT_ENV_ORIGIN, JSON.stringify({ output }));

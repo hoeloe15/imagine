@@ -20,9 +20,9 @@ API key, or in your own Azure tenant behind a Microsoft login.
 Three tools, and your AI decides when to use them.
 
 **`generate_image`** makes one picture, writes it to disk and hands back the
-path, the cost and why that model was chosen. The image bytes never travel back
-through the conversation. Running in the cloud, the picture comes back as a link
-you can open instead of a path on a machine you cannot reach
+path, the cost and why that model was chosen — plus the picture itself, so your
+chat shows it right away. Running in the cloud, you also get a link to the
+full-size image instead of a path on a machine you cannot reach
 ([how](docs/hosting.md#where-the-pictures-go)).
 
 > "Make me a flat vector illustration of a lighthouse at dusk for slide 4."

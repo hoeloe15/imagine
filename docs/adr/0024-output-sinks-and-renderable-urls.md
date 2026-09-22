@@ -1,6 +1,7 @@
 # 24. Output sinks and renderable URLs
 
-**Status:** accepted
+**Status:** accepted; its premise that image bytes never return in the tool
+result is superseded by [ADR 0029](0029-inline-image-in-the-tool-result.md)
 **Date:** 2026-09-04
 **Follows:** [ADR 0003](0003-normalised-seam-types.md),
 [ADR 0006](0006-output-writing-naming-and-the-manifest.md),
@@ -19,6 +20,10 @@ thing the result could not deliver.
 The constraint that caused it is deliberate and is not moving: image bytes never
 travel back through the tool result (PLAN.md §4.2, ADR 0010). A base64 payload
 in a tool result is a model's whole context spent on pixels it cannot look at.
+
+> **Superseded on this point by [ADR 0029](0029-inline-image-in-the-tool-result.md):**
+> sent as an MCP image item, the picture is shown in the chat and seen by the
+> model for about 1,400 tokens. The sinks and links below still stand.
 
 So the answer is not "send the bytes", it is "store them somewhere the client
 can fetch them from, and hand back a link".

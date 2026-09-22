@@ -115,6 +115,28 @@ describe("the output sink", () => {
     expect(parsed.success).toBe(false);
   });
 
+  it("sends the picture inline unless something says otherwise", () => {
+    expect(DEFAULT_CONFIG.output.inline_image).toBe(true);
+
+    const withoutSwitch: Record<string, unknown> = { ...DEFAULT_CONFIG.output };
+    delete withoutSwitch["inline_image"];
+    const parsed = configSchema.safeParse({ ...DEFAULT_CONFIG, output: withoutSwitch });
+    expect(parsed.success && parsed.data.output.inline_image).toBe(true);
+  });
+
+  it("lets a file switch inline images off", () => {
+    expect(configFileSchema.parse({ output: { inline_image: false } })).toEqual({
+      output: { inline_image: false },
+    });
+    expect(merged({ inline_image: false }).data?.output.inline_image).toBe(false);
+  });
+
+  it("refuses an inline_image that is not a boolean", () => {
+    expect(
+      configFileSchema.safeParse({ output: { inline_image: "yes" } }).success,
+    ).toBe(false);
+  });
+
   it("accepts the blob section in a file fragment too", () => {
     const parsed = configFileSchema.safeParse({
       output: { sink: "blob", blob: { ...blob, url_ttl_hours: 6 } },

@@ -139,6 +139,7 @@ export const configFileSchema = z
         manifest: path.nullable(),
         sink,
         blob: blobFileSchema.nullable(),
+        inline_image: z.boolean(),
       })
       .partial(),
     budget: z
@@ -167,6 +168,7 @@ export const configSchema = z
       manifest: path.nullable(),
       sink: sink.default("local"),
       blob: blobSchema.nullable().default(null),
+      inline_image: z.boolean().default(true),
     }),
     budget: z.strictObject({
       max_usd_per_session: usd.nullable(),
@@ -257,6 +259,7 @@ export const DEFAULT_CONFIG: Config = configSchema.parse({
     manifest: "./imagine-output/manifest.jsonl",
     sink: "local",
     blob: null,
+    inline_image: true,
   },
   budget: {
     max_usd_per_session: 5,

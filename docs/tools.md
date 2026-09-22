@@ -5,9 +5,9 @@ MCP. For a one-paragraph tour, see the [README](../README.md).
 
 ## `generate_image`
 
-Generates one image, stores it and returns where it went plus what it cost.
-The bytes never travel back to the client
-([why](adr/0010-mcp-server-and-the-generate-image-tool.md)).
+Generates one image, stores it and returns where it went plus what it cost —
+and the picture itself, so the chat can show it straight away
+([why](adr/0029-inline-image-in-the-tool-result.md)).
 
 | Argument        | Type                                                        | Required |
 | --------------- | ----------------------------------------------------------- | -------- |
@@ -76,8 +76,7 @@ calling model can read it and act:
 `url` appears only when the server stores images somewhere it can hand out a
 link. It is a short-lived signed URL — one hour by default, `output.blob.
 url_ttl_hours` to change it — scoped to that one image, so it is safe to show
-and it stops working on its own. Render it, or download it if you need the
-pixels; the bytes are still never in the result itself
+and it stops working on its own. It is the full-size file and the one to share
 ([ADR 0024](adr/0024-output-sinks-and-renderable-urls.md)).
 
 `url_expires_at` is the exact moment that link dies — the same instant the
@@ -95,23 +94,37 @@ model never has to invent a validity period; say what it says, or say nothing.
 }
 ```
 
-### How the result asks to be shown
+### What else comes back, and how the picture gets shown
 
-A chat client handed only the JSON above tends to print the link and tell the
-user it cannot display images. So when `url` is present the result carries two
-more things next to the envelope, both of them about rendering and neither of
-them containing any pixels:
+A link on its own is not enough: some chat clients print it as a bare link, and
+claude.ai shows it as a "Show Image" box the user has to click. So the result
+carries the picture itself. In order:
 
-- a second text block spelling out what to do —
-  `Show the image to the user with markdown: ![A lighthouse at dusk](<url>)
-(link valid until 2026-09-04T13:00:00Z). Do not fetch, download or re-encode
-the bytes, and do not state any other validity period.`
-- a `resource_link` content item (`uri` the link, `name` the filename,
-  `mimeType` the image type, `description` a short form of the prompt), which
-  clients that understand it render on their own.
+1. **The JSON envelope** above. Always first and never changed, so anything that
+   parses `content[0].text` keeps working.
+2. **The picture**, as an MCP image item (`type: "image"`, `data` the image in
+   base64, `mimeType` its type). claude.ai, Claude Code, Claude Desktop and
+   Mistral show it in the conversation, and the model sees it as a picture —
+   about 1,400 tokens for a 1024 × 1024 image. This is the only place the
+   encoded image appears; the envelope and the text never contain it.
+3. **A short instruction to the model.** With the picture included, it says the
+   picture is already shown and not to also write it as a markdown image, and,
+   when there is a link, gives the link and when it expires.
+4. **A `resource_link` item**, when there is a link (`uri` the link, `name` the
+   filename, `mimeType` the image type, `description` a short form of the
+   prompt), which some clients render on their own.
 
-The first content block is still the JSON envelope, untouched, so anything that
-parses `content[0].text` keeps working.
+Two situations leave the picture out:
+
+- **It is too large.** Chat clients refuse very large images, so a picture whose
+  encoded form is over 4 MB is not included. The instruction then says so and
+  tells the model to show the link as a markdown image —
+  `![A lighthouse at dusk](<url>) (link valid until 2026-09-04T13:00:00Z)` — or,
+  on a laptop, to point at the file.
+- **It is switched off** with `output.inline_image: false`
+  ([configuration](configuration.md#the-picture-in-the-chat)). The result is
+  then the link-only one: the envelope, the markdown instruction when there is a
+  link, and the `resource_link`.
 
 ## `list_capabilities`
 

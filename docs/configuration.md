@@ -74,7 +74,8 @@ in any editor with JSON Schema support:
     "filename": "{slug}-{hash}.{ext}",
     "manifest": "./imagine-output/manifest.jsonl",
     "sink": "local",
-    "blob": null
+    "blob": null,
+    "inline_image": true
   },
   "budget": {
     "max_usd_per_session": 5,
@@ -103,6 +104,8 @@ in any editor with JSON Schema support:
 | `output.dir`                 | Where images are written. Relative paths resolve against the server's working directory.        |
 | `output.filename`            | Template over `{slug}`, `{hash}` and `{ext}`. Names a file, never a path.                      |
 | `output.manifest`            | JSONL log of every image. `null` falls back to `manifest.jsonl` inside the output directory.    |
+| `output.sink`                | `local` writes files; `blob` uploads to Azure Blob Storage and returns a link. See below.        |
+| `output.inline_image`        | Send the picture back in the result so the chat shows it. `false` returns only the path or link. |
 | `budget.max_usd_per_session` | Cap for one server process. `null` for no cap.                                                 |
 | `budget.max_usd_per_day`     | Cap for one local calendar day, across restarts. `null` for no cap.                            |
 | `budget.on_exceed`           | `refuse` to block the call, `warn` to run it and flag it.                                      |
@@ -349,6 +352,29 @@ provider, model, cost, dimensions, MIME type, duration and timestamp. That
 manifest is what the phase 2 gallery will read. Set it to `null` and it falls
 back to `manifest.jsonl` inside the resolved output directory. See
 [ADR 0006](adr/0006-output-writing-naming-and-the-manifest.md).
+
+### The picture in the chat
+
+Besides storing the image, `generate_image` sends the picture back in its
+result, so the chat shows it straight away instead of a link to click. It costs
+the conversation about 1,400 tokens for a 1024 × 1024 image. A picture too
+large for chat clients to accept (over 4 MB once encoded) is left out, and the
+path or link is all that comes back.
+
+To switch this off and get only the path or link:
+
+```json
+{
+  "output": {
+    "inline_image": false
+  }
+}
+```
+
+or set `IMAGINE_OUTPUT_INLINE_IMAGE=false` (`true` or `false`, nothing else). It
+sits with the other `IMAGINE_OUTPUT_*` variables in precedence, so an `output`
+section in `IMAGINE_CONFIG_JSON` wins over it. Why the picture comes back at all
+is in [ADR 0029](adr/0029-inline-image-in-the-tool-result.md).
 
 ### Storing images in Azure Blob Storage instead
 

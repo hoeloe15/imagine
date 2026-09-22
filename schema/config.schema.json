@@ -181,6 +181,9 @@
               "type": "null"
             }
           ]
+        },
+        "inline_image": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

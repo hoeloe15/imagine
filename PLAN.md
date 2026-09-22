@@ -141,6 +141,10 @@ explains is one the model can reason with.
 
 ### 4.2 Never base64 in tool results
 
+> **Narrowed by [ADR 0029](docs/adr/0029-inline-image-in-the-tool-result.md):**
+> base64 still never goes into text, but the picture now also comes back as an
+> MCP image item, which a chat shows inline and a model sees as an image.
+
 Every provider API researched returns base64. Every single one. That is fine —
 for the server. It is not fine for the client: a 1024×1024 PNG is roughly 1.4 MB
 of base64, which is on the order of 350k tokens if it ever lands in a context

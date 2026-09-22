@@ -418,8 +418,14 @@ the path names a directory inside a container nobody can reach, on a disk that i
 wiped on the next deploy. A chat client given that path shows a broken image.
 
 So a hosted deployment can put the images in Blob Storage instead. The tool
-result then carries a `url` next to `path` — a link that opens in a browser and
-renders in a chat client, with no Azure sign-in.
+result then carries a `url` next to `path` — a link to the full-size image that
+opens in a browser with no Azure sign-in, and that you can share.
+
+The picture itself also comes back in the result, so the chat shows it without
+the user clicking anything; that works with either setting below. The link is
+what remains for sharing, for clients that cannot show pictures, and for the
+rare image too large to send inline
+([configuration](configuration.md#the-picture-in-the-chat)).
 
 ```powershell
 azd env set IMAGINE_OUTPUT_SINK blob

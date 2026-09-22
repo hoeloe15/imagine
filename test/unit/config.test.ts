@@ -556,6 +556,35 @@ describe("the IMAGINE_OUTPUT_* variables", () => {
     expect(failure).toContain("IMAGINE_OUTPUT_BLOB_URL_TTL_HOURS");
   });
 
+  it("switch inline images off without touching the sink", () => {
+    const loaded = load({ IMAGINE_OUTPUT_INLINE_IMAGE: "false" });
+
+    expect(loaded.config.output.inline_image).toBe(false);
+    expect(loaded.config.output.sink).toBe("local");
+    expect(loaded.origins).toContain("the IMAGINE_OUTPUT_* environment variables");
+  });
+
+  it("read the inline-image switch regardless of case", () => {
+    expect(
+      load({ IMAGINE_OUTPUT_INLINE_IMAGE: "TRUE" }).config.output.inline_image,
+    ).toBe(true);
+  });
+
+  it("reject an inline-image switch that is not true or false", () => {
+    const failure = attempt(() => load({ IMAGINE_OUTPUT_INLINE_IMAGE: "no" }));
+
+    expect(failure).toContain("IMAGINE_OUTPUT_INLINE_IMAGE");
+  });
+
+  it("lose the inline-image switch to IMAGINE_CONFIG_JSON", () => {
+    const loaded = load({
+      IMAGINE_OUTPUT_INLINE_IMAGE: "false",
+      IMAGINE_CONFIG_JSON: JSON.stringify({ output: { inline_image: true } }),
+    });
+
+    expect(loaded.config.output.inline_image).toBe(true);
+  });
+
   it("report a bad value against the field it lands in", () => {
     const failure = attempt(() =>
       load({ ...blobEnv, IMAGINE_OUTPUT_BLOB_ACCOUNT_URL: "mystorage" }),
